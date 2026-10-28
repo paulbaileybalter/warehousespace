@@ -29,8 +29,8 @@ The password check covers every page and file. Prefer named-person logins? Use C
 - **Brew plan & stock → Upload Live Brewery Board** reads the *Cartons* rows of each `WC …` tab (cases packed per day) from the
   current week onwards. The file is read in the browser and is never uploaded anywhere.
 - Enter the stock count and any orders already on their way, then work down the **Order desk**.
-- The pallet allowance (default 105, cartons + clusters) is changed in the **Pallet space** section.
-  Can storage limits (90 comfortable / 104 maximum) are under the Cans card.
+- The pallet allowance (default 105: cartons, clusters and pallet pads together) is changed in the **Pallet space** section.
+  Cans have their own store of 90 pallets (limit set under the Cans card). If cartons, clusters and pads overflow 105, free spaces in the can store are used before the site reports a shortfall. Pallet pads count toward the 105 using *pads per pallet* in Settings (placeholder 1,000).
 - Figures are saved in the browser only. **Settings → Data → Export backup** moves them between computers.
 - `public/seed.js` holds the starting figures taken from the spreadsheets. Delete it (and its `<script>` line in `index.html`) to start blank.
 
@@ -39,7 +39,7 @@ The password check covers every page and file. Prefer named-person logins? Use C
 | Material | Supplier | Order | Arrives | Cover target |
 |---|---|---|---|---|
 | Clusters | Smurfit Westrock | Thursday | following Wednesday | per-SKU minimum stock to the end of the week *after* delivery (Cluster Wrap Order Sheet) |
-| Cans | Orora | Thursday | Mon–Fri mornings the following week (evening second load only if essential) | planned production + 10% buffer to end of delivery week (Orora Order Sheet) |
+| Cans | Orora | Thursday | Mon–Fri mornings the following week (evening second load only if essential) | planned production + 10% buffer to end of delivery week (Orora Order Sheet). Every truck is exactly 22 pallets: part-loads are topped up with cans due later that week, and a SKU can be split across days |
 | Cartons | Visy | Thursday | any weekday the following week | handbook reorder-below level, order in batch sizes (SOP-008) |
 | Pallet pads | Visy | Thursday | any weekday the following week | order 6,000 when stock drops below 4,000 |
 

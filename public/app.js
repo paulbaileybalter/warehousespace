@@ -81,12 +81,12 @@ function defParams(it) {
   if (it.mat === 'cartons') { var h = HB_CARTON[it.sku]; return { perPallet: 1050, perCase: 1, min: h[0], step: h[1], minPct: 0 }; }
   if (it.mat === 'clusters') return { perPallet: 32000, perCase: 4, min: CLUSTER_MIN[it.sku] || 0, step: 32000, minPct: 0 };
   if (it.mat === 'cans') return { perPallet: 7391, perCase: 16, min: 0, step: 7391, minPct: 10 };
-  return { perPallet: 0, perCase: 1, min: 4000, step: 6000, minPct: 0 };
+  return { perPallet: 1000, perCase: 1, min: 4000, step: 6000, minPct: 0 };
 }
 
 function blankState() {
   var s = { v: 2, capacity: 105, countDate: todayISO(), sample: false, params: {}, stock: {}, plan: {}, lbb: {}, lbbWeeks: [], lbbMeta: null, invMeta: null, invOnOrder: {}, delMeta: {},  open: [], orders: {}, ordersFor: '', lids: {}, viewDate: null, uid: 1,
-    settings: { dueTodayOpen: true, clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 104 }, ui: {} };
+    settings: { dueTodayOpen: true, clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 90 }, ui: {} };
   ITEMS.forEach(function (it) { s.params[it.id] = defParams(it); s.stock[it.id] = 0; });
   ALL_SKUS.forEach(function (k) { s.plan[k] = {}; s.lbb[k] = {}; });
   return s;
@@ -117,6 +117,8 @@ function normalise(j) {
   var b = blankState(), s = Object.assign(b, j || {});
   s.settings = Object.assign(blankState().settings, (j && j.settings) || {});
   s.ui = s.ui || {};
+  if (s.settings.canMax === 104) s.settings.canMax = 90; // can store limit is 90 pallets
+  if (j && j.params && j.params['pads:all'] && !j.params['pads:all'].perPallet) delete j.params['pads:all'].perPallet;
   ITEMS.forEach(function (it) {
     s.params[it.id] = Object.assign(defParams(it), (j && j.params && j.params[it.id]) || {});
     s.stock[it.id] = Number(j && j.stock && j.stock[it.id]) || 0;
@@ -170,6 +172,10 @@ function dayUse(it, p, d) {
   }
   return dayCases(it.sku, d) * p.perCase;
 }
+function partsOf(A) {
+  if (A.parts) return Object.keys(A.parts).sort().map(function (d) { return { date: d, qty: A.parts[d] * state.params[A.it.id].perPallet }; });
+  return A.qty > 0 ? [{ date: A.day, qty: A.qty }] : [];
+}
 function sim(it, p, dels) {
   var s = state.stock[it.id] || 0, out = new Array(TL.days.length);
   for (var i = 0; i < TL.days.length; i++) {
@@ -214,6 +220,8 @@ function analyse() {
     if (m.fixedDay == null) {
       for (var k = 4; k >= 0; k--) { var prev = addDays(TL.dwDays[k], -1); if (A.base[TL.idx[prev]].end >= A.avgDaily) { A.latestIdx = k; break; } }
     }
+    A.nextUse = 0; for (var q = 1; q <= 7; q++) { var rr = A.base[TL.idx[addDays(coverDate, q)]]; if (rr) A.nextUse += rr.use; }
+    A.locked = (state.orders[it.id] || {}).qty != null;
     var next7 = A.base[TL.idx[addDays(coverDate, 7)]];
     A.status = A.risk ? 'risk' : A.need > 0.5 ? 'order' : (next7 && next7.end < A.min ? 'watch' : 'ok');
     var ov = state.orders[it.id] || {};
@@ -223,21 +231,56 @@ function analyse() {
     R.items[it.id] = A;
   });
 
-  // 2. pack Orora deliveries into trucks (suggested days only; manual choices are respected)
-  var load = {}; TL.dwDays.forEach(function (d) { load[d] = Number(state.lids[d]) || 0; });
+  // 2. pack Orora deliveries into trucks. Every truck is exactly TRUCK pallets: any shortfall is filled with
+  //    pallets of cans that are not due until later (the next day or later that week), never a part-load.
+  var lid = {}, load = {}; TL.dwDays.forEach(function (d) { lid[d] = Number(state.lids[d]) || 0; load[d] = 0; });
   var canA = ITEMS.filter(function (i) { return i.mat === 'cans'; }).map(function (i) { return R.items[i.id]; });
-  canA.forEach(function (A) { if (A.dayEdited && A.qty > 0) load[A.day] += palletsOf(A.it, A.qty); });
+  function addPart(A, d, pal) { A.parts = A.parts || {}; A.parts[d] = (A.parts[d] || 0) + pal; load[d] += pal; }
+  canA.forEach(function (A) { A.parts = null; if (A.qty > 0 && A.dayEdited) addPart(A, A.day, palletsOf(A.it, A.qty)); });
   canA.filter(function (A) { return !A.dayEdited && A.qty > 0; }).sort(function (a, b) { return a.latestIdx - b.latestIdx || b.qty - a.qty; }).forEach(function (A) {
-    var pal = palletsOf(A.it, A.qty), pick = -1, k;
-    for (k = A.latestIdx; k >= 0; k--) if (load[TL.dwDays[k]] + pal <= TRUCK + 1e-9) { pick = k; break; }
-    if (pick < 0) { pick = A.latestIdx; for (k = A.latestIdx; k >= 0; k--) if (load[TL.dwDays[k]] < load[TL.dwDays[pick]]) pick = k; }
-    A.day = TL.dwDays[pick]; load[A.day] += pal;
+    var left = palletsOf(A.it, A.qty), k;
+    for (k = A.latestIdx; k >= 0 && left > 1e-9; k--) {
+      var d = TL.dwDays[k], room = Math.max(0, TRUCK - lid[d] - load[d]), take = A.locked ? Math.min(left, room) : Math.min(left, Math.floor(room + 1e-9));
+      if (take > 1e-9) { addPart(A, d, take); left -= take; }
+    }
+    if (left > 1e-9) { // no room anywhere in time: an extra truck on the latest possible day
+      var pick = A.latestIdx; for (k = A.latestIdx; k >= 0; k--) if (load[TL.dwDays[k]] < load[TL.dwDays[pick]]) pick = k;
+      addPart(A, TL.dwDays[pick], left);
+    }
+  });
+  R.truckInfo = {};
+  TL.dwDays.forEach(function (d) {
+    var room = TRUCK - lid[d], info = { trucks: 0, short: 0, pulls: [], room: room };
+    R.truckInfo[d] = info;
+    if (load[d] <= 1e-9 || room <= 0) return;
+    info.trucks = Math.ceil(load[d] / room - 1e-9);
+    var short = Math.floor(info.trucks * room - load[d] + 1e-9);
+    while (short > 0) {
+      var best = null, bestScore = Infinity;
+      canA.forEach(function (A) {
+        if (A.locked || A.nextUse <= 0 || A.dayEdited) return;
+        var have = A.parts ? Object.keys(A.parts).reduce(function (t, x) { return t + A.parts[x]; }, 0) : 0;
+        var sc = (A.endCover + have * state.params[A.it.id].perPallet - A.min) / A.nextUse;
+        if (sc < bestScore) { bestScore = sc; best = A; }
+      });
+      if (!best) break;
+      addPart(best, d, 1); short -= 1;
+      var pl = info.pulls.filter(function (x) { return x.sku === best.it.label; })[0];
+      if (pl) pl.pal += 1; else info.pulls.push({ sku: best.it.label, pal: 1 });
+    }
+    info.short = Math.max(0, Math.round((info.trucks * room - load[d]) * 100) / 100);
+  });
+  canA.forEach(function (A) {
+    if (!A.parts) return;
+    var pp = state.params[A.it.id].perPallet, ds = Object.keys(A.parts).sort();
+    A.qty = ds.reduce(function (t, x) { return t + A.parts[x]; }, 0) * pp;
+    A.day = ds.reduce(function (m, x) { return A.parts[x] > (A.parts[m] || 0) ? x : m; }, ds[ds.length - 1]);
   });
 
   // 3. projection including this order, cover checks
   ITEMS.forEach(function (it) {
     var A = R.items[it.id], d2 = Object.assign({}, A.dels);
-    if (A.qty > 0) d2[A.day] = (d2[A.day] || 0) + A.qty;
+    partsOf(A).forEach(function (pt) { d2[pt.date] = (d2[pt.date] || 0) + pt.qty; });
     A.full = sim(it, A.p, d2);
     A.endCoverFull = A.full[TL.idx[A.coverDate]].end;
     A.shortAfter = Math.max(0, A.min - A.endCoverFull);
@@ -252,16 +295,17 @@ function analyse() {
     R.mats[mk] = { items: its, worst: worst, needing: its.filter(function (a) { return a.status === 'order' || a.status === 'risk'; }).length, qtyUnits: its.reduce(function (a, x) { return a + x.qty; }, 0) };
   });
 
-  // 4. pallet space: cartons + clusters share the allowance; cans have their own store
+  // 4. pallet space: cartons, clusters and pallet pads share the allowance; cans have their own store
   TL.days.forEach(function (d, i) {
-    var c = 0, k = 0, arr = 0, cn = 0;
+    var c = 0, k = 0, pd = 0, arr = 0, cn = 0;
     ITEMS.forEach(function (it) {
       var r = R.items[it.id].full[i];
       if (it.mat === 'cartons') { c += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
       else if (it.mat === 'clusters') { k += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
+      else if (it.mat === 'pads') { pd += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
       else if (it.mat === 'cans') cn += palSpace(it, r.peak);
     });
-    R.space.push({ date: d, c: c, k: k, total: c + k, arr: arr });
+    R.space.push({ date: d, c: c, k: k, p: pd, total: c + k + pd, arr: arr });
     R.cansStore.push({ date: d, total: cn });
   });
   var peak = null, cpeak = null;
@@ -269,14 +313,20 @@ function analyse() {
   R.peak = peak; R.canPeak = cpeak;
   R.view = state.viewDate && TL.idx[state.viewDate] != null ? R.space[TL.idx[state.viewDate]] : peak;
   var cap = state.capacity;
-  R.spaceStatus = r1(R.peak.total) > cap ? 'order' : R.peak.total >= cap * 0.9 ? 'watch' : 'ok';
+  // cartons, clusters and pads that do not fit the allowance may use free pallet spaces in the can store
+  R.space.forEach(function (r, i) { r.spill = Math.max(0, r.total - cap); r.canFree = Math.max(0, state.settings.canMax - R.cansStore[i].total); r.short = Math.max(0, r.spill - r.canFree); });
+  var wkd = function (r) { var w = dow(r.date); return w > 0 && w < 6; };
+  R.spillDays = R.space.filter(function (r) { return wkd(r) && r1(r.spill) > 0; });
+  R.shortDays = R.space.filter(function (r) { return wkd(r) && r1(r.short) > 0; });
+  R.spaceStatus = R.shortDays.length ? 'order' : R.spillDays.length || R.peak.total >= cap * 0.9 ? 'watch' : 'ok';
   R.overDays = R.space.filter(function (r) { var w = dow(r.date); return w > 0 && w < 6 && r1(r.total) > cap; });
-  R.canStatus = R.canPeak.total > state.settings.canMax ? 'order' : R.canPeak.total > state.settings.canSoft ? 'watch' : 'ok';
+  R.canStatus = R.canPeak.total > state.settings.canMax ? 'order' : R.canPeak.total >= state.settings.canMax * 0.9 || R.spillDays.length ? 'watch' : 'ok';
 
   // 5. what lands each day of the delivery week
   TL.dwDays.forEach(function (d) { R.events[d] = { smurfit: 0, cartons: 0, pads: 0, cans: 0, spaceIn: 0, lids: Number(state.lids[d]) || 0 }; });
   ITEMS.forEach(function (it) {
     var A = R.items[it.id]; if (A.qty <= 0) return;
+    if (it.mat === 'cans') { partsOf(A).forEach(function (pt) { var ee = R.events[pt.date]; if (ee) ee.cans += palletsOf(it, pt.qty); }); return; }
     var e = R.events[A.day]; if (!e) return;
     if (it.mat === 'clusters') { e.smurfit += palletsOf(it, A.qty); e.spaceIn += palletsOf(it, A.qty); }
     if (it.mat === 'cartons') { e.cartons += A.qty; e.spaceIn += palletsOf(it, A.qty); }
@@ -305,9 +355,9 @@ function hero(R) {
   });
   var sp = R.spaceStatus;
   h += '<a class="tile st-' + sp + '" href="#space"><span class="ico">' + icon('glass') + '</span><h3>Pallet space</h3>' +
-    chip(sp, sp === 'order' ? 'Over allowance' : sp === 'watch' ? 'Nearly full' : 'Room to spare') + '<p>Peak ' + fmt(R.peak.total, 1) + ' of ' + state.capacity + ' pallets (' + fMed(R.peak.date) + ')</p></a>' +
+    chip(sp, sp === 'order' ? 'Over allowance — no room left' : R.spillDays.length ? 'Using can-store space' : sp === 'watch' ? 'Nearly full' : 'Room to spare') + '<p>Peak ' + fmt(R.peak.total, 1) + ' of ' + state.capacity + ' pallets (' + fMed(R.peak.date) + ')</p></a>' +
     '<a class="tile st-' + R.canStatus + '" href="#mat-cans"><span class="ico">' + icon('can') + '</span><h3>Can store</h3>' +
-    chip(R.canStatus, R.canStatus === 'order' ? 'Over maximum' : R.canStatus === 'watch' ? 'Over comfortable limit' : 'Within limits') + '<p>Peak ' + fmt(R.canPeak.total, 1) + ' pallets (limit ' + state.settings.canSoft + ' / ' + state.settings.canMax + ')</p></a></div></section>';
+    chip(R.canStatus, R.canStatus === 'order' ? 'Over the limit' : R.spillDays.length ? 'Sharing space' : R.canStatus === 'watch' ? 'Close to the limit' : 'Within the limit') + '<p>Peak ' + fmt(R.canPeak.total, 1) + ' pallets (limit ' + state.settings.canMax + ')</p></a></div></section>';
   return h;
 }
 
@@ -344,7 +394,7 @@ function orderRow(R, A) {
   var dayCell;
   if (m.fixedDay != null) dayCell = '<strong>' + fMed(TL.wed) + '</strong><small>fixed by Smurfit</small>';
   else dayCell = '<select data-act="day" data-id="' + it.id + '" data-fid="day:' + it.id + '" aria-label="Delivery day for ' + esc(it.label) + '">' +
-    TL.dwDays.map(function (d) { return '<option value="' + d + '"' + (d === A.day ? ' selected' : '') + '>' + fMed(d) + '</option>'; }).join('') + '</select>';
+    TL.dwDays.map(function (d) { return '<option value="' + d + '"' + (d === A.day ? ' selected' : '') + '>' + fMed(d) + '</option>'; }).join('') + '</select>' + (A.parts && Object.keys(A.parts).length > 1 ? '<small>' + partsOf(A).map(function (pt) { return fmt(pt.qty / state.params[A.it.id].perPallet, 0) + ' plt ' + fDow(pt.date); }).join(' · ') + '</small>' : '') + (A.pull ? '' : '');
   var after;
   if (A.shortAfter > 0.5) after = '<span class="warn-t">Short ' + dispQty(it, A.shortAfter) + ' ' + dispUnit(it) + '</span><small>below minimum stock</small>';
   else after = '✓ meets minimum<small>' + (A.lastsTo ? 'lasts to ' + fMed(A.lastsTo) : 'lasts beyond plan') + '</small>';
@@ -376,30 +426,30 @@ function matCard(R, mk) {
 }
 
 function trucks(R) {
-  var h = '<div class="trucks"><h4>' + icon('truck') + 'Truck fill · ' + TRUCK + ' pallets per truck</h4>';
+  var h = '<div class="trucks"><h4>' + icon('truck') + 'Truck fill · every truck is exactly ' + TRUCK + ' pallets</h4>';
   TL.dwDays.forEach(function (d) {
-    var e = R.events[d], pal = e.cans, lids = e.lids, tot = pal + lids;
-    var note, over = tot > TRUCK + 1e-9;
+    var e = R.events[d], pal = e.cans, lids = e.lids, ti = R.truckInfo[d], n = Math.max(1, ti.trucks), cap = n * TRUCK;
+    var note;
     if (pal <= 0) note = '<span class="muted">No cans</span>';
-    else if (over) note = '<span class="warn-t">' + fmt(tot - TRUCK, 1) + ' pallets over one truck</span> — move some to another day, or use the evening load';
-    else if (tot < TRUCK) note = fmt(TRUCK - tot, 1) + ' spare pallet spaces on the truck';
+    else if (ti.short > 0) note = '<span class="warn-t">Needs ' + fmt(ti.short, 0) + ' more pallet' + (ti.short === 1 ? '' : 's') + ' to make a full ' + TRUCK + '-pallet truck</span> — add cans that are not due until later this week';
+    else if (n > 1) note = '<span class="warn-t">' + n + ' full trucks</span> — a second load is rare (evening only); consider moving some to another day';
     else note = 'Full truck ✓';
-    h += '<div class="trow"><strong>' + fMed(d) + '</strong><div class="bar" title="' + fmt(tot, 1) + ' pallets">' +
-      '<span class="' + (over ? 'over' : '') + '" style="width:' + clamp(pal / TRUCK * 100, 0, 100) + '%"></span>' +
-      (lids > 0 ? '<span class="eve" style="width:' + clamp(lids / TRUCK * 100, 0, 100 - clamp(pal / TRUCK * 100, 0, 100)) + '%"></span>' : '') + '</div>' +
+    if (pal > 0 && ti.pulls.length) note += '<br><small>Topped up with ' + ti.pulls.map(function (x) { return fmt(x.pal, 0) + ' × ' + esc(x.sku); }).join(', ') + ' (due later)</small>';
+    h += '<div class="trow"><strong>' + fMed(d) + '</strong><div class="bar" title="' + fmt(pal + lids, 1) + ' pallets">' +
+      '<span style="width:' + clamp(pal / cap * 100, 0, 100) + '%"></span>' +
+      (lids > 0 ? '<span class="eve" style="width:' + clamp(lids / cap * 100, 0, 100 - clamp(pal / cap * 100, 0, 100)) + '%"></span>' : '') + '</div>' +
       '<div class="tnote">' + (pal > 0 ? '<b>' + fmt(pal, 1) + ' plt cans</b> · ' : '') + note + '</div></div>' +
       '<div class="trow" style="padding:0 0 6px"><span></span><label>Lids / other pallets on this truck <input type="number" min="0" step="1" class="cell-in" style="max-width:70px" value="' + (lids || '') + '" placeholder="0" data-act="lids" data-date="' + d + '" data-fid="lids:' + d + '"></label><span></span></div>';
   });
-  return h + '<p class="muted" style="font-size:11.5px;margin-top:4px">Blue = lids or other pallets sharing the truck (lids are not planned here, so enter how many you are bringing). If a day needs more than one truck, Orora can send a second load that evening — rare.</p></div>';
+  return h + '<p class="muted" style="font-size:11.5px;margin-top:4px">Orora trucks always carry ' + TRUCK + ' pallets. When the cans needed do not make a full truck, the site adds pallets of the cans that run short soonest after this week, so they arrive early. Blue = lids or other pallets sharing the truck (enter how many you are bringing). Type your own quantity on a line to override.</p></div>';
 }
 
 function canStore(R) {
   var s = state.settings, pk = R.canPeak;
   var h = '<div class="trucks" style="border-top:1px solid var(--line);padding-top:14px"><h4>' + icon('can') + 'Can store · ' + fmt(pk.total, 1) + ' pallets at the delivery-week peak (' + fMed(pk.date) + ') ' +
     chip(R.canStatus, R.canStatus === 'order' ? 'Over maximum' : R.canStatus === 'watch' ? 'Over comfortable limit' : 'Within limits') + '</h4>' +
-    '<div class="chart-wrap" style="padding:0">' + barChart(R, { stacks: [{ color: '#47D7AC', get: function (i) { return R.cansStore[i].total; } }], lines: [{ v: s.canSoft, label: 'Comfortable ' + s.canSoft, dash: true }, { v: s.canMax, label: 'Maximum ' + s.canMax, dash: false, orange: true }], overAt: s.canMax, aria: 'Projected can storage in pallets each weekday' }) + '</div>' +
-    '<div class="row" style="margin-top:6px;font-size:12px"><label class="muted">Comfortable limit <input type="number" class="cell-in" min="1" value="' + s.canSoft + '" data-act="setting" data-k="canSoft" data-fid="s:canSoft" style="max-width:76px"></label>' +
-    '<label class="muted">Absolute maximum <input type="number" class="cell-in" min="1" value="' + s.canMax + '" data-act="setting" data-k="canMax" data-fid="s:canMax" style="max-width:76px"></label><span class="muted">pallets (from the Orora order sheet: 90 / 104)</span></div></div>';
+    '<div class="chart-wrap" style="padding:0">' + barChart(R, { stacks: [{ color: '#47D7AC', get: function (i) { return R.cansStore[i].total; } }], lines: [{ v: s.canMax, label: 'Limit ' + s.canMax, dash: true }], overAt: s.canMax, aria: 'Projected can storage in pallets each weekday' }) + '</div>' +
+    '<div class="row" style="margin-top:6px;font-size:12px"><label class="muted">Can store limit <input type="number" class="cell-in" min="1" value="' + s.canMax + '" data-act="setting" data-k="canMax" data-fid="s:canMax" style="max-width:76px"></label><span class="muted">pallets for cans alone</span></div></div>';
   return h;
 }
 
@@ -475,30 +525,33 @@ function spaceSection(R) {
   var wk = TL.days.filter(function (d) { var w = dow(d); return w > 0 && w < 6; });
   var den = Math.max(v.total, cap);
   var h = '<section class="sec" id="space"><div class="sec-head"><div><span class="eyebrow">Pallet space</span><h2>How full is the cellar?</h2>' +
-    '<p>Cartons and clusters share one pallet allowance. Cans have their own store (shown under Cans above) and pallet pads are not counted.</p></div></div>' +
+    '<p>Cartons, clusters and pallet pads share one pallet allowance. Cans have their own store of 90 pallets (shown under Cans above); if cartons, clusters and pads overflow, spare can-store spaces are used.</p></div></div>' +
     '<div class="panel"><div class="space-grid"><div>' + glassSVG(frac, over, cap) + '</div><div>' +
-    '<div class="caprow"><label for="capInput">Pallet space allowance (cartons + clusters)</label>' +
+    '<div class="caprow"><label for="capInput">Pallet space allowance (cartons, clusters + pads)</label>' +
     '<button class="btn step" data-act="capstep" data-d="-5" aria-label="Minus 5">−5</button><button class="btn step" data-act="capstep" data-d="-1" aria-label="Minus 1">−1</button>' +
     '<input type="number" id="capInput" min="1" max="9999" step="1" value="' + cap + '" data-act="cap" data-fid="cap">' +
     '<button class="btn step" data-act="capstep" data-d="1" aria-label="Plus 1">+1</button><button class="btn step" data-act="capstep" data-d="5" aria-label="Plus 5">+5</button><span class="muted" style="font-size:12px">pallets</span></div>' +
     '<div class="big num">' + fmt(v.total, 1) + '<small>of ' + cap + ' pallets on ' + fMed(v.date) + '</small></div>' +
-    chip(over ? 'order' : free <= cap * 0.1 ? 'watch' : 'ok', over ? 'Over by ' + fmt(v.total - cap, 1) + ' pallets' : fmt(free, 1) + ' pallets free') +
-    '<div class="split" aria-hidden="true"><span style="width:' + (v.c / den * 100).toFixed(1) + '%;background:var(--purple)"></span><span style="width:' + (v.k / den * 100).toFixed(1) + '%;background:var(--sky)"></span></div>' +
-    '<div class="sl"><span><i style="background:var(--purple)"></i>Cartons ' + fmt(v.c, 1) + ' pallets</span><span><i style="background:var(--sky)"></i>Clusters ' + fmt(v.k, 1) + ' pallets</span></div>' +
+    chip(over ? (r1(v.short) > 0 ? 'order' : 'watch') : free <= cap * 0.1 ? 'watch' : 'ok', over ? (r1(v.short) > 0 ? 'Over by ' + fmt(v.short, 1) + ' pallets even using can space' : fmt(v.spill, 1) + ' pallets in can-store space') : fmt(free, 1) + ' pallets free') +
+    '<div class="split" aria-hidden="true"><span style="width:' + (v.c / den * 100).toFixed(1) + '%;background:var(--purple)"></span><span style="width:' + (v.k / den * 100).toFixed(1) + '%;background:var(--sky)"></span><span style="width:' + ((v.p || 0) / den * 100).toFixed(1) + '%;background:var(--orange)"></span></div>' +
+    '<div class="sl"><span><i style="background:var(--purple)"></i>Cartons ' + fmt(v.c, 1) + ' pallets</span><span><i style="background:var(--sky)"></i>Clusters ' + fmt(v.k, 1) + ' pallets</span><span><i style="background:var(--orange)"></i>Pallet pads ' + fmt(v.p || 0, 1) + ' pallets</span></div>' +
     '<div class="viewrow"><label for="viewSel">Showing</label><select id="viewSel" data-act="viewsel" data-fid="viewsel">' + wk.map(function (d) { return '<option value="' + d + '"' + (d === v.date ? ' selected' : '') + '>' + fMed(d) + '</option>'; }).join('') + '</select>' +
     (state.viewDate ? '<button class="btn small" data-act="viewpeak">Back to delivery-week peak</button>' : '<span>(peak day of delivery week)</span>') + '</div>' +
-    '</div></div><div class="chart-wrap">' + barChart(R, { stacks: [{ color: '#7566A0', get: function (i) { return R.space[i].c; } }, { color: '#99D6EA', get: function (i) { return R.space[i].k; } }], lines: [{ v: cap, label: 'Allowance ' + cap, dash: true }], overAt: cap, selectable: true, aria: 'Projected pallet space used each weekday against the allowance' }) + '</div>' +
+    '</div></div><div class="chart-wrap">' + barChart(R, { stacks: [{ color: '#7566A0', get: function (i) { return R.space[i].c; } }, { color: '#99D6EA', get: function (i) { return R.space[i].k; } }, { color: '#FDAA63', get: function (i) { return R.space[i].p; } }], lines: [{ v: cap, label: 'Allowance ' + cap, dash: true }], overAt: cap, selectable: true, aria: 'Projected pallet space used each weekday against the allowance' }) + '</div>' +
     '<div class="chart-leg"><span><i style="background:var(--purple)"></i>Cartons</span><span><i style="background:var(--sky)"></i>Clusters</span><span><i class="dash"></i>Allowance</span><span><i style="background:#fff;border:3px solid var(--orange)"></i>Over allowance</span><span>▲ delivery arrives</span><span>Click a bar to show it in the glass</span></div>';
-  if (R.overDays.length) {
-    var worst = R.overDays.reduce(function (a, b) { return b.total > a.total ? b : a; });
-    h += '<p class="note"><span class="warn-t">Over the allowance on ' + R.overDays.length + ' weekday' + (R.overDays.length > 1 ? 's' : '') + '</span> — worst is ' + fMed(worst.date) + ' at ' + fmt(worst.total, 1) + ' pallets (' + fmt(worst.total - cap, 1) + ' over). Trim a carton or cluster order, move a Visy delivery later in the week, or raise the allowance.</p>';
+  if (R.shortDays.length) {
+    var worst = R.shortDays.reduce(function (a, b) { return b.short > a.short ? b : a; });
+    h += '<p class="note"><span class="warn-t">Does not fit on ' + R.shortDays.length + ' weekday' + (R.shortDays.length > 1 ? 's' : '') + ', even using spare can-store space</span> — worst is ' + fMed(worst.date) + ': ' + fmt(worst.total, 1) + ' pallets against ' + cap + ' (+ ' + fmt(worst.canFree, 1) + ' free in the can store), short by ' + fmt(worst.short, 1) + '. Trim a carton, cluster or pad order, move a Visy delivery later in the week, or raise the allowance.</p>';
+  } else if (R.spillDays.length) {
+    var w2 = R.spillDays.reduce(function (a, b) { return b.spill > a.spill ? b : a; });
+    h += '<p class="note"><span class="warn-t">Over the ' + cap + '-pallet allowance on ' + R.spillDays.length + ' weekday' + (R.spillDays.length > 1 ? 's' : '') + '</span> — worst is ' + fMed(w2.date) + ' at ' + fmt(w2.total, 1) + ' pallets. The extra ' + fmt(w2.spill, 1) + ' fits in spare can-store space (' + fmt(w2.canFree, 1) + ' free that day).</p>';
   } else h += '<p class="note">✓ Everything fits within the ' + cap + '-pallet allowance for the whole planning window.</p>';
-  h += '<div class="tbl-wrap"><table><thead><tr><th>Delivery week</th><th class="r">Cartons in (plt)</th><th class="r">Clusters in (plt)</th><th class="r">On site after deliveries</th><th class="r">Free</th></tr></thead><tbody>';
+  h += '<div class="tbl-wrap"><table><thead><tr><th>Delivery week</th><th class="r">Cartons in (plt)</th><th class="r">Clusters in (plt)</th><th class="r">Pads in (plt)</th><th class="r">On site after deliveries</th><th class="r">Free</th></tr></thead><tbody>';
   TL.dwDays.forEach(function (d) {
-    var i = TL.idx[d], rc = 0, rk = 0;
-    ITEMS.forEach(function (it) { if (it.mat === 'cartons' || it.mat === 'clusters') { var pl = R.items[it.id].full[i].del / state.params[it.id].perPallet; if (it.mat === 'cartons') rc += pl; else rk += pl; } });
+    var i = TL.idx[d], rc = 0, rk = 0, rp = 0;
+    ITEMS.forEach(function (it) { if (it.mat === 'cartons' || it.mat === 'clusters' || it.mat === 'pads') { var pl = R.items[it.id].full[i].del / state.params[it.id].perPallet; if (it.mat === 'cartons') rc += pl; else if (it.mat === 'pads') rp += pl; else rk += pl; } });
     var t = R.space[i].total, fr = cap - t;
-    h += '<tr><td><strong>' + fMed(d) + '</strong></td><td class="r num">' + (rc ? fmt(rc, 1) : '—') + '</td><td class="r num">' + (rk ? fmt(rk, 1) : '—') + '</td><td class="r num"><b>' + fmt(t, 1) + '</b></td><td class="r num">' + (fr < 0 ? '<span class="warn-t">' + fmt(fr, 1) + '</span>' : fmt(fr, 1)) + '</td></tr>';
+    h += '<tr><td><strong>' + fMed(d) + '</strong></td><td class="r num">' + (rc ? fmt(rc, 1) : '—') + '</td><td class="r num">' + (rk ? fmt(rk, 1) : '—') + '</td><td class="r num">' + (rp ? fmt(rp, 1) : '—') + '</td><td class="r num"><b>' + fmt(t, 1) + '</b></td><td class="r num">' + (fr < 0 ? '<span class="warn-t">' + fmt(fr, 1) + '</span>' : fmt(fr, 1)) + '</td></tr>';
   });
   return h + '</tbody></table></div></div></section>';
 }
@@ -586,7 +639,7 @@ function settingsSection() {
   h += '<details class="panel" data-ui="params"><summary>Minimum stock, order step and conversions <small>all editable</small></summary><div class="panel-body"><div class="tbl-wrap" style="padding:0"><table><thead><tr><th>Item</th><th class="r">Units per pallet</th><th class="r">Units per case</th><th class="r">Minimum stock</th><th class="r">Buffer on planned use (%)</th><th class="r">Order step</th></tr></thead><tbody>';
   var notes = {
     cartons: '<span class="src hb">Handbook</span> 1,050 per pallet; reorder-below and batch sizes from SOP-008 · one carton per case · <span class="src ph">Check</span> LPA and Black Lager levels (3,000 / 3,000) are placeholders',
-    pads: '<span class="src">You</span> Order 6,000 when stock drops below 4,000. Pads used per finished pallet below is still a guess — please check',
+    pads: '<span class="src">You</span> Order 6,000 when stock drops below 4,000 · <span class="src ph">Check</span> pads per pallet (1,000) is a guess and sets how much of the 105-pallet allowance the pads take; pads used per finished pallet below is also a guess',
     clusters: '<span class="src hb">Cluster sheet</span> 32,000 per pallet, 4 per case, minimum stock per SKU, ordered in whole pallets',
     cans: '<span class="src hb">Orora sheet</span> 7,391 per pallet, 16 per case, 10% buffer on planned production, ordered in whole pallets'
   };
@@ -595,7 +648,7 @@ function settingsSection() {
     ITEMS.filter(function (i) { return i.mat === mk; }).forEach(function (it) {
       var p = state.params[it.id];
       h += '<tr><td class="sku">' + esc(it.label) + '</td>' +
-        '<td class="r">' + (mk === 'pads' ? '<span class="muted">n/a</span>' : '<input class="cell-in" type="number" min="1" value="' + p.perPallet + '" data-act="param" data-f="perPallet" data-id="' + it.id + '" data-fid="pp:' + it.id + '">') + '</td>' +
+        '<td class="r">' + ('<input class="cell-in" type="number" min="1" value="' + p.perPallet + '" data-act="param" data-f="perPallet" data-id="' + it.id + '" data-fid="pp:' + it.id + '">') + '</td>' +
         '<td class="r">' + (mk === 'pads' ? '<span class="muted">see below</span>' : '<input class="cell-in" type="number" min="0" step="any" value="' + p.perCase + '" data-act="param" data-f="perCase" data-id="' + it.id + '" data-fid="pc:' + it.id + '">') + '</td>' +
         '<td class="r"><input class="cell-in" type="number" min="0" step="any" value="' + Math.round(toDisp(it, p.min) * 100) / 100 + '" data-act="param" data-f="min" data-id="' + it.id + '" data-fid="mn:' + it.id + '"><small>' + dispUnit(it) + '</small></td>' +
         '<td class="r"><input class="cell-in" type="number" min="0" step="any" value="' + (p.minPct || 0) + '" data-act="param" data-f="minPct" data-id="' + it.id + '" data-fid="mp:' + it.id + '"></td>' +
@@ -610,7 +663,7 @@ function settingsSection() {
     '<p>Orders are placed on a <strong>Thursday</strong>. Clusters land the <strong>following Wednesday</strong>; cartons and pallet pads can land <strong>any weekday</strong> the following week; cans land <strong>Mon–Fri mornings</strong> that week.</p>' +
     '<p style="margin-top:8px">Stock is projected day by day from your count, using the cases packed each day on the Live Brewery Board (16 cans, 4 clusters and 1 carton per case) and the orders already on their way. A line is flagged <strong>Order this Thursday</strong> when projected stock would fall below its minimum at the <em>cover date</em>:</p>' +
     '<ul style="margin:6px 0 0 18px;padding:0"><li><strong>Clusters</strong> — end of delivery week (one week ahead, as run for the rest of the year; switch to two weeks in Settings), with the per-SKU emergency minimum stock.</li><li><strong>Cans</strong> — end of delivery week, covering planned production plus a 10% buffer (as in the Orora Order Sheet).</li><li><strong>Cartons &amp; pads</strong> — end of delivery week, keeping the Visy reorder-below level from SOP-008.</li></ul>' +
-    '<p style="margin-top:8px">Quantities round up to the order step (whole pallets for clusters and cans). Cans are placed on trucks of 22 pallets, filling the latest day that still works, and cartons/pads are suggested for the latest weekday that leaves about a day of buffer.</p>' +
+    '<p style="margin-top:8px">Quantities round up to the order step (whole pallets for clusters and cans). Cans are placed on trucks of exactly 22 pallets, filling the latest day that still works and topping up any part-load with cans due later in the week, and cartons/pads are suggested for the latest weekday that leaves about a day of buffer.</p>' +
     '<p style="margin-top:8px"><strong>Run-out before delivery</strong> means stock is projected to hit zero before the earliest day this order could arrive — ordering alone will not fix it, so talk to the supplier.</p></div></details>';
   h += '<details class="panel" style="margin-top:14px" data-ui="data"><summary>Data <small>saved in this browser only</small></summary><div class="panel-body"><div class="row">' +
     '<button class="btn" data-act="export">Export backup (.json)</button><button class="btn" data-act="import">Import backup</button><button class="btn" data-act="sample">Reload starting figures</button><button class="btn" data-act="clear">Clear all figures</button></div>' +
@@ -630,7 +683,7 @@ function summaryText(R) {
         var it = A.it, line = '  ' + (mk === 'pads' ? 'Pallet pads' : MAT[mk].name + ' ' + it.label) + ': ';
         if (MAT[mk].entry === 'pallets') line += fmt(palletsOf(it, A.qty), 2) + ' pallets (' + fmt(A.qty) + ' ' + MAT[mk].unit + ')';
         else line += fmt(A.qty) + ' ' + MAT[mk].unit + (mk === 'cartons' ? ' (' + fmt(palletsOf(it, A.qty), 1) + ' pallets)' : '');
-        if (MAT[mk].fixedDay == null) line += ' — deliver ' + fMed(A.day);
+        if (MAT[mk].fixedDay == null) line += A.parts && Object.keys(A.parts).length > 1 ? ' — deliver ' + partsOf(A).map(function (pt) { return fmt(pt.qty / state.params[A.it.id].perPallet, 0) + ' plt ' + fMed(pt.date); }).join(', ') : ' — deliver ' + fMed(A.day);
         L.push(line);
       });
     });
@@ -638,7 +691,7 @@ function summaryText(R) {
     L.push('');
   });
   L.push('Pallet space (cartons + clusters): peak ' + fmt(R.peak.total, 1) + ' of ' + state.capacity + ' pallets on ' + fMed(R.peak.date) + (r1(R.peak.total) > state.capacity ? ' — OVER ALLOWANCE' : ' — within allowance'));
-  L.push('Can store: peak ' + fmt(R.canPeak.total, 1) + ' pallets (comfortable ' + state.settings.canSoft + ', maximum ' + state.settings.canMax + ')');
+  L.push('Can store: peak ' + fmt(R.canPeak.total, 1) + ' pallets (limit ' + state.settings.canMax + ')');
   return L.join('\n');
 }
 
@@ -649,7 +702,7 @@ function summarySection(R) {
       R.mats[mk].items.forEach(function (A) {
         if (A.qty <= 0) return; var it = A.it;
         var q = MAT[mk].entry === 'pallets' ? fmt(palletsOf(it, A.qty), 2) + ' plt' : fmt(A.qty);
-        rows += '<li><span>' + (mk === 'pads' ? 'Pallet pads' : MAT[mk].name + ' · ' + esc(it.label)) + (MAT[mk].fixedDay == null ? ' <span class="muted">' + fDow(A.day) + '</span>' : '') + '</span><b class="num">' + q + '</b></li>';
+        rows += '<li><span>' + (mk === 'pads' ? 'Pallet pads' : MAT[mk].name + ' · ' + esc(it.label)) + (MAT[mk].fixedDay == null ? ' <span class="muted">' + (A.parts && Object.keys(A.parts).length > 1 ? partsOf(A).map(function (pt) { return fDow(pt.date); }).join(' + ') : fDow(A.day)) + '</span>' : '') + '</span><b class="num">' + q + '</b></li>';
       });
     });
     return '<div class="sumbox"><h4>' + title + '</h4><div class="sub">' + sub + '</div>' + (rows ? '<ul>' + rows + '</ul>' : '<div class="none">Nothing to order</div>') + '</div>';
@@ -657,8 +710,8 @@ function summarySection(R) {
   var short = MAT_ORDER.some(function (m) { return R.mats[m].items.some(function (a) { return a.shortAfter > 0.5; }); });
   return '<section class="sec" id="summary"><div class="sec-head"><div><span class="eyebrow">Ready to raise POs</span><h2>Thursday order summary</h2></div><button class="btn teal" data-act="copy">Copy order summary</button></div><div class="panel"><div class="sum">' +
     box('Smurfit Westrock', 'Clusters · arrive ' + fMed(TL.wed), ['clusters']) + box('Visy', 'Cartons &amp; pallet pads · Mon–Fri ' + fShort(TL.dwDays[0]) + ' – ' + fShort(TL.dwDays[4]), ['cartons', 'pads']) + box('Orora', 'Cans · Mon–Fri mornings', ['cans']) + '</div>' +
-    '<div class="checkline">' + chip(R.spaceStatus === 'order' ? 'order' : 'ok', R.spaceStatus === 'order' ? 'Pallet space over allowance' : 'Fits pallet allowance') +
-    chip(R.canStatus === 'order' ? 'order' : R.canStatus, R.canStatus === 'ok' ? 'Can store within limits' : R.canStatus === 'watch' ? 'Can store over comfortable limit' : 'Can store over maximum') +
+    '<div class="checkline">' + chip(R.spaceStatus === 'order' ? 'order' : R.spillDays.length ? 'watch' : 'ok', R.spaceStatus === 'order' ? 'Pallet space over allowance' : R.spillDays.length ? 'Fits using can-store space' : 'Fits pallet allowance') +
+    chip(R.canStatus === 'order' ? 'order' : R.canStatus, R.canStatus === 'ok' ? 'Can store within limits' : R.canStatus === 'watch' ? 'Can store near its limit' : 'Can store over its limit') +
     chip(short ? 'order' : 'ok', short ? 'Some lines below minimum' : 'All lines meet minimum') + '</div></div></section>';
 }
 
