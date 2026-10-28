@@ -14,10 +14,9 @@ Repository layout: `public/` (the site), `src/worker.js`, `wrangler.jsonc`, `REA
    - Build command: *(leave empty)*
    - Deploy command: `npx wrangler deploy` (the default)
 3. After the first deploy, open the Worker → **Settings → Variables and Secrets** and add (type *Secret*):
-   - `SITE_PASSWORD` — the shared password (required)
-   - `SITE_USER` — the username (optional, defaults to `balter`)
-   Adding a secret takes effect straight away. Visiting the site asks for the username and password
-   (a browser sign-in box). If `SITE_PASSWORD` is missing the site stays locked rather than open.
+   - `SITE_PASSWORD` — the shared password (required). There are no usernames.
+   Adding a secret takes effect straight away. Visiting the site shows a password page
+   (a Balter-branded password page; it remembers you for 30 days). If `SITE_PASSWORD` is missing the site stays locked rather than open.
 4. Every push to the repository redeploys the Worker.
 
 The password check covers every page and file. Prefer named-person logins? Use Cloudflare Zero Trust → Access in front of the Worker.
