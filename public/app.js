@@ -6,29 +6,28 @@
 
 /* ------------------------------------------------------------------ constants */
 var KEY = 'balter-ordering-v2';
-var ALL_SKUS = ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK', 'GBWIND', 'GBWAY', 'GBSUB'];
-var SKU_LABEL = { XPA: 'XPA', CPT: 'CPT', EAZY: 'Eazy', HAZY: 'Hazy', IPA: 'IPA', LPA: 'LPA', LIMITED: 'Limited', BLACK: 'Black Lager', GBWIND: 'GB Windjammer', GBWAY: 'GB Wayfarer', GBSUB: 'GB Subtropic' };
+var ALL_SKUS = ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK'];
+var SKU_LABEL = { XPA: 'XPA', CPT: 'CPT', EAZY: 'Eazy', HAZY: 'Hazy', IPA: 'IPA', LPA: 'LPA', LIMITED: 'Limited', BLACK: 'Black Lager' };
 // How names in the Live Brewery Board / order sheets map to SKUs (first match wins, spaces and symbols ignored)
-var SKU_MAP = [['GBSUB', 'GBSUB'], ['SUBTROPIC', 'GBSUB'], ['GBWAY', 'GBWAY'], ['GBWF', 'GBWAY'], ['WAYFARER', 'GBWAY'], ['GBWIND', 'GBWIND'], ['GBWJ', 'GBWIND'], ['WINDJAMMER', 'GBWIND'],
-  ['LIMITED', 'LIMITED'], ['BLACK', 'BLACK'], ['BLAGER', 'BLACK'], ['EAZY', 'EAZY'], ['EZ', 'EAZY'], ['HAZY', 'HAZY'], ['XPA', 'XPA'], ['CPT', 'CPT'], ['IPA', 'IPA'], ['LPA', 'LPA']];
+var SKU_MAP = [['LIMITED', 'LIMITED'], ['BLACK', 'BLACK'], ['BLAGER', 'BLACK'], ['EAZY', 'EAZY'], ['EZ', 'EAZY'], ['HAZY', 'HAZY'], ['XPA', 'XPA'], ['CPT', 'CPT'], ['IPA', 'IPA'], ['LPA', 'LPA']];
 function mapSku(label) {
   var s = String(label || '').toUpperCase().replace(/[^A-Z]/g, '');
   for (var i = 0; i < SKU_MAP.length; i++) if (s.indexOf(SKU_MAP[i][0]) === 0) return SKU_MAP[i][1];
   return null;
 }
 // Visy carton reorder-below / batch size — Role Handbook SOP-008
-var HB_CARTON = { XPA: [30000, 20000], CPT: [9000, 10000], EAZY: [14500, 16000], HAZY: [8000, 8000], IPA: [3300, 5000], GBWAY: [5500, 3000], GBWIND: [5500, 3000], GBSUB: [3000, 3000], LPA: [3000, 3000], BLACK: [3000, 3000] };
+var HB_CARTON = { XPA: [30000, 20000], CPT: [9000, 10000], EAZY: [14500, 16000], HAZY: [8000, 8000], IPA: [3300, 5000], LPA: [3000, 3000], BLACK: [3000, 3000] };
 // Minimum cluster stock per SKU — Cluster Wrap Order Sheet
-var CLUSTER_MIN = { XPA: 64000, CPT: 32000, EAZY: 32000, HAZY: 32000, IPA: 32000, LPA: 32000, LIMITED: 0, BLACK: 0, GBWIND: 0, GBWAY: 0 };
+var CLUSTER_MIN = { XPA: 64000, CPT: 32000, EAZY: 32000, HAZY: 32000, IPA: 32000, LPA: 32000, LIMITED: 0, BLACK: 0 };
 var MAT_ORDER = ['cartons', 'pads', 'clusters', 'cans'];
 var MAT = {
-  cartons:  { name: 'Cartons',     supplier: 'Visy',             icon: 'carton',  space: true,  entry: 'units',   unit: 'cartons',  fixedDay: null, skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'BLACK', 'GBWAY', 'GBWIND', 'GBSUB'],
+  cartons:  { name: 'Cartons',     supplier: 'Visy',             icon: 'carton',  space: true,  entry: 'units',   unit: 'cartons',  fixedDay: null, skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'BLACK'],
     rule: 'Visy · arrives any day Mon–Fri the week after you order' },
   pads:     { name: 'Pallet pads', supplier: 'Visy',             icon: 'pad',     space: false, entry: 'units',   unit: 'pads',     fixedDay: null, skus: null,
     rule: 'Visy · arrives any day Mon–Fri the week after you order (same order as cartons)' },
-  clusters: { name: 'Clusters',    supplier: 'Smurfit Westrock', icon: 'cluster', space: true,  entry: 'pallets', unit: 'clusters', fixedDay: 2,    skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'GBWIND', 'GBWAY', 'BLACK'],
+  clusters: { name: 'Clusters',    supplier: 'Smurfit Westrock', icon: 'cluster', space: true,  entry: 'pallets', unit: 'clusters', fixedDay: 2,    skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK'],
     rule: 'Smurfit Westrock · always arrives the Wednesday after you order · stock is kept to the end of the delivery week (one week ahead; two weeks is a setting)' },
-  cans:     { name: 'Cans',        supplier: 'Orora',            icon: 'can',     space: false, entry: 'pallets', unit: 'cans',     fixedDay: null, skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK', 'GBWIND', 'GBWAY', 'GBSUB'],
+  cans:     { name: 'Cans',        supplier: 'Orora',            icon: 'can',     space: false, entry: 'pallets', unit: 'cans',     fixedDay: null, skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK'],
     rule: 'Orora · Mon–Fri mornings the week after you order · evening second load only if essential' }
 };
 var TRUCK = 22; // pallets per Orora truck
@@ -102,7 +101,7 @@ function seed() {
   state = s; TL = computeTL(s.countDate);
   ['clusters', 'cans'].forEach(function (m) { Object.keys(S.stock[m]).forEach(function (k) { if (ITEM[m + ':' + k]) s.stock[m + ':' + k] = S.stock[m][k]; }); });
   // placeholders for cartons and pads: a little above the point where an order is triggered
-  var fac = { XPA: 0.9, CPT: 0.7, EAZY: 1.2, HAZY: 1.0, IPA: 1.4, GBWAY: 1.3, GBWIND: 1.5, GBSUB: 1.1 };
+  var fac = { XPA: 0.9, CPT: 0.7, EAZY: 1.2, HAZY: 1.0, IPA: 1.4 };
   ITEMS.forEach(function (it) {
     if (it.mat !== 'cartons' && it.mat !== 'pads') return;
     var p = s.params[it.id], unit = it.mat === 'cartons' ? 500 : 50;
@@ -808,7 +807,7 @@ async function parseLBB(file) {
         var lab = cs[2 + 3 * k], q = cs[4 + 3 * k];
         if (lab == null || typeof q !== 'number' || !(q > 0)) return;
         var sku = mapSku(lab);
-        if (!sku) { ignored[String(lab).trim()] = 1; return; }
+        if (!sku) { if (!/\bGB\b|GBSUB|GBWAY|GBWIND|GREEN/i.test(String(lab))) ignored[String(lab).trim()] = 1; return; }
         out[sku][date] = (out[sku][date] || 0) + Math.round(q);
       });
     }
@@ -872,7 +871,7 @@ async function parseInventory(file) {
     var mat = /^can$/i.test(m[1]) ? 'cans' : /^carton/i.test(m[1]) ? 'cartons' : 'clusters';
     var sku = mapSku(m[2]), id = sku ? mat + ':' + sku : null;
     var on = typeof c[colOn] === 'number' ? c[colOn] : 0, od = typeof c[colOrd] === 'number' ? c[colOrd] : 0;
-    if (!id || !ITEM[id]) { if (on > 0) unmapped.push(nm.trim()); return; }
+    if (!id || !ITEM[id]) { if (on > 0 && !/\bGB\b/i.test(nm)) unmapped.push(nm.trim()); return; }
     stock[id] = (stock[id] || 0) + Math.max(0, on);
     if (od > 0) onOrder[id] = (onOrder[id] || 0) + od;
   });
