@@ -85,8 +85,8 @@ function defParams(it) {
 }
 
 function blankState() {
-  var s = { v: 2, capacity: 105, countDate: todayISO(), sample: false, params: {}, stock: {}, plan: {}, lbb: {}, lbbWeeks: [], lbbMeta: null, invMeta: null, invOnOrder: {}, open: [], orders: {}, ordersFor: '', lids: {}, viewDate: null, uid: 1,
-    settings: { clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 104 }, ui: {} };
+  var s = { v: 2, capacity: 105, countDate: todayISO(), sample: false, params: {}, stock: {}, plan: {}, lbb: {}, lbbWeeks: [], lbbMeta: null, invMeta: null, invOnOrder: {}, delMeta: {},  open: [], orders: {}, ordersFor: '', lids: {}, viewDate: null, uid: 1,
+    settings: { dueTodayOpen: true, clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 104 }, ui: {} };
   ITEMS.forEach(function (it) { s.params[it.id] = defParams(it); s.stock[it.id] = 0; });
   ALL_SKUS.forEach(function (k) { s.plan[k] = {}; s.lbb[k] = {}; });
   return s;
@@ -123,7 +123,7 @@ function normalise(j) {
   });
   ALL_SKUS.forEach(function (k) { s.plan[k] = (j && j.plan && j.plan[k]) || {}; s.lbb[k] = (j && j.lbb && j.lbb[k]) || {}; });
   s.lbbWeeks = Array.isArray(s.lbbWeeks) ? s.lbbWeeks.filter(function (w) { return /^\d{4}-\d{2}-\d{2}$/.test(w); }) : [];
-  s.open = Array.isArray(s.open) ? s.open.filter(function (o) { return o && ITEM[o.itemId] && /^\d{4}-\d{2}-\d{2}$/.test(o.date); }).map(function (o) { return { id: o.id || 0, itemId: o.itemId, qty: Number(o.qty) || 0, date: o.date }; }) : [];
+  s.open = Array.isArray(s.open) ? s.open.filter(function (o) { return o && ITEM[o.itemId] && /^\d{4}-\d{2}-\d{2}$/.test(o.date); }).map(function (o) { var r = { id: o.id || 0, itemId: o.itemId, qty: Number(o.qty) || 0, date: o.date }; if (o.src) r.src = o.src; if (o.po) r.po = String(o.po); if (o.slot) r.slot = o.slot; return r; }) : [];
   var mx = s.open.reduce(function (m, o) { return Math.max(m, Number(o.id) || 0); }, 0);
   s.open.forEach(function (o) { if (!o.id) o.id = ++mx; });
   s.uid = mx + 1;
@@ -509,6 +509,13 @@ function planSection() {
   var h = '<section class="sec" id="inputs"><div class="sec-head"><div><span class="eyebrow">Brew plan &amp; stock</span><h2>What the numbers are built from</h2>' +
     '<p>The brew schedule comes from the Live Brewery Board; the stock count and any orders already on their way are entered here. Everything above updates straight away.</p></div></div>';
 
+  var dm = state.delMeta || {};
+  h += '<div class="panel" style="margin-bottom:14px"><div class="pad"><div class="row" style="justify-content:space-between;align-items:flex-start"><div style="max-width:660px"><h3 style="font-size:15px">Orora &amp; cluster order sheets — what is coming and when</h3>' +
+    '<p class="muted" style="font-size:12.5px;margin-top:3px">Upload the <b>Orora Order Sheet</b> and the <b>Cluster Wrap Order Sheet</b> (select both at once, or one at a time). The site reads each week\'s tab and lists every can load (with PO and AM/PM) and cluster delivery from the stock-count day up to the delivery week you are about to order for. Re-uploading replaces the earlier sheet figures; loads you typed in yourself are kept. Can loads are 22 pallets.</p>' +
+    '<label class="row" style="margin-top:8px;font-size:12.5px;gap:8px"><input type="checkbox" data-act="cdin" data-fid="s:cdin"' + (state.settings.dueTodayOpen !== false ? ' checked' : '') + ' style="width:16px;height:16px;accent-color:var(--purple)"> Include deliveries due on the stock-count day <span class="muted">(untick if they are already in the stock spreadsheet)</span></label>' +
+    ['orora', 'cluster'].map(function (k) { var m = dm[k]; return '<p style="font-size:12.5px;margin-top:8px">' + (m ? chip('ok', 'Loaded') + ' <b>' + esc(m.name) + '</b> · ' + m.n + ' deliveries · uploaded ' + fMed(m.at) : chip('watch', 'Not loaded') + ' ' + (k === 'orora' ? 'Orora Order Sheet' : 'Cluster Wrap Order Sheet')) + '</p>'; }).join('') +
+    '</div><div class="row"><button class="btn teal" data-act="delpick">Upload order sheets (.xlsx)</button>' + (state.open.some(function (o) { return o.src; }) ? '<button class="btn" data-act="delclear">Remove sheet deliveries</button>' : '') + '</div></div></div></div>';
+
   var im = state.invMeta, oo = state.invOnOrder || {}, ooKeys = Object.keys(oo).filter(function (id) { return ITEM[id] && oo[id] > 0; });
   h += '<div class="panel" style="margin-bottom:14px"><div class="pad"><div class="row" style="justify-content:space-between;align-items:flex-start"><div style="max-width:660px"><h3 style="font-size:15px">Stock spreadsheet (NetSuite inventory)</h3>' +
     '<p class="muted" style="font-size:12.5px;margin-top:3px">Upload the <b>Inventory – HOPS, YEAST, Grain, Packaging</b> export each time. The <b>Can</b>, <b>Carton Empty</b> and <b>Cluster</b> rows fill the stock table below and the stock date is set to today. Pallet pads are not in that report, so enter them by hand. The file is read in your browser and is not sent anywhere.</p>' +
@@ -558,16 +565,16 @@ function planSection() {
   h += '</tbody></table></div><div class="row" style="margin-top:12px"><label class="fld" style="max-width:240px"><span>Pallet pads on hand (pads)</span><input type="number" min="0" step="50" value="' + (state.stock[pit.id] || '') + '" placeholder="0" data-act="stock" data-id="pads:all" data-fid="stock:pads:all"></label></div>' +
     '<p class="muted" style="font-size:11.5px;margin-top:8px">Count on the Wednesday and include Thursday and Friday deliveries that are still to arrive in <b>Orders already on their way</b> below (as in the order SOPs).</p></div></details>';
 
-  h += '<details class="panel" style="margin-top:14px" open data-ui="open"><summary>Orders already on their way <small>placed on earlier Thursdays and not yet delivered</small></summary><div class="panel-body"><div class="tbl-wrap" style="padding:0"><table><thead><tr><th>Item</th><th class="r">Quantity</th><th>Arrives</th><th></th></tr></thead><tbody>';
+  h += '<details class="panel" style="margin-top:14px" open data-ui="open"><summary>Orders already on their way <small>placed on earlier Thursdays and not yet delivered</small></summary><div class="panel-body"><div class="tbl-wrap" style="padding:0"><table><thead><tr><th>Item</th><th class="r">Quantity</th><th class="r">PO</th><th>Arrives</th><th></th></tr></thead><tbody>';
   var opens = state.open.slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
-  if (!opens.length) h += '<tr><td colspan="4" class="muted">Nothing on the way. Add anything that is still to be delivered so it is counted.</td></tr>';
+  if (!opens.length) h += '<tr><td colspan="5" class="muted">Nothing on the way. Add anything that is still to be delivered so it is counted.</td></tr>';
   opens.forEach(function (o) {
     var it = ITEM[o.itemId];
     h += '<tr><td><span class="sku">' + esc(MAT[it.mat].name) + '</span> · ' + esc(it.label) + '</td><td class="r"><input class="cell-in" type="number" min="0" step="any" value="' + Math.round(toDisp(it, o.qty) * 100) / 100 + '" data-act="oqty" data-oid="' + o.id + '" data-fid="oqty:' + o.id + '" aria-label="Quantity"><small>' + dispUnit(it) + '</small></td>' +
-      '<td><input type="date" value="' + o.date + '" data-act="odate" data-oid="' + o.id + '" data-fid="odate:' + o.id + '" style="max-width:160px"></td><td><button class="btn small" data-act="odel" data-oid="' + o.id + '">Remove</button></td></tr>';
+      '<td class="r" style="white-space:nowrap">' + (o.po ? '<small>' + esc(o.po) + (o.slot ? ' · ' + esc(o.slot) : '') + '</small>' : '') + '</td><td><input type="date" value="' + o.date + '" data-act="odate" data-oid="' + o.id + '" data-fid="odate:' + o.id + '" style="max-width:160px"></td><td><button class="btn small" data-act="odel" data-oid="' + o.id + '">Remove</button></td></tr>';
   });
   h += '<tr><td><select id="oaItem" data-fid="oaitem" aria-label="Item to add">' + ITEMS.map(function (it) { return '<option value="' + it.id + '">' + MAT[it.mat].name + ' · ' + esc(it.label) + '</option>'; }).join('') + '</select></td>' +
-    '<td class="r"><input class="cell-in" type="number" id="oaQty" min="0" step="any" placeholder="Qty" data-fid="oaqty" aria-label="Quantity"><small>cartons / pads / pallets</small></td>' +
+    '<td class="r"><input class="cell-in" type="number" id="oaQty" min="0" step="any" placeholder="Qty" data-fid="oaqty" aria-label="Quantity"><small>cartons / pads / pallets</small></td><td></td>' +
     '<td><input type="date" id="oaDate" value="' + addDays(TL.cd, 1) + '" data-fid="oadate" style="max-width:160px"></td><td><button class="btn teal small" data-act="oadd">Add</button></td></tr>';
   return h + '</tbody></table></div></div></details></section>';
 }
@@ -834,6 +841,101 @@ async function importInventory(file) {
   } catch (e) { toast('Could not read that file: ' + (e && e.message ? e.message : e)); }
 }
 
+/* ---- Orora / Cluster Wrap order sheet import */
+async function readSheets(file, maxSheets) {
+  var zip = openZip(await file.arrayBuffer());
+  var wbx = await zip.text('xl/workbook.xml'), rels = await zip.text('xl/_rels/workbook.xml.rels');
+  var relMap = {}; (rels.match(/<Relationship\b[^>]*>/g) || []).forEach(function (t) { var id = /\bId="([^"]+)"/.exec(t), tg = /\bTarget="([^"]+)"/.exec(t); if (id && tg) relMap[id[1]] = tg[1]; });
+  var list = (wbx.match(/<sheet\b[^>]*>/g) || []).map(function (t) { var nm = /\bname="([^"]*)"/.exec(t), rid = /\br:id="([^"]+)"/.exec(t), st = /\bstate="([^"]+)"/.exec(t); return { name: nm ? xmlDecode(nm[1]) : '', rid: rid ? rid[1] : '', hidden: !!(st && st[1] !== 'visible') }; }).filter(function (x) { return !x.hidden && relMap[x.rid]; });
+  var sst = await zip.text('xl/sharedStrings.xml'), strings = [];
+  (sst.match(/<si>[\s\S]*?<\/si>|<si\/>/g) || []).forEach(function (si) { var t = ''; si.replace(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g, function (m, x) { t += x; return m; }); strings.push(xmlDecode(t)); });
+  var out = [];
+  for (var i = 0; i < Math.min(list.length, maxSheets); i++) {
+    var xml = await zip.text(relMap[list[i].rid].replace(/^\/?(xl\/)?/, 'xl/')); if (!xml) continue;
+    var rows = {};
+    xml.replace(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g, function (m, r, body) {
+      if (Number(r) > 40) return m;
+      var cells = {};
+      body.replace(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g, function (mm, attrs, inner) {
+        var ref = /\br="([A-Z]+)\d+"/.exec(attrs), ty = /\bt="([^"]+)"/.exec(attrs), v = /<v>([\s\S]*?)<\/v>/.exec(inner || '');
+        if (!ref) return mm;
+        var val = null;
+        if (ty && ty[1] === 's' && v) val = strings[Number(v[1])];
+        else if (ty && ty[1] === 'inlineStr') { var tt = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/.exec(inner || ''); val = tt ? xmlDecode(tt[1]) : null; }
+        else if (ty && ty[1] === 'str' && v) val = xmlDecode(v[1]);
+        else if (v && v[1] !== '') val = Number(v[1]);
+        if (val !== null && val !== undefined) cells[colNum(ref[1])] = val;
+        return mm;
+      });
+      rows[r] = cells; return m;
+    });
+    out.push({ name: list[i].name, rows: rows });
+  }
+  return out;
+}
+
+function sheetSku(label) { return mapSku(String(label || '').toUpperCase().replace(/^\s*(BALTER|GREEN\s*BEACON|GB\s*(?=WIND|WAY|SUB))\s*/, function (m) { return /^GB/.test(m.trim()) ? 'GB' : ''; })); }
+
+async function parseDeliverySheets(file) {
+  var sheets = await readSheets(file, 14), kind = null, found = {}, weekOf = {}, from = state.countDate, to = TL.dw;
+  function put(key, rec, wk) { if (!found[key] || wk >= weekOf[key]) { found[key] = rec; weekOf[key] = wk; } }
+  sheets.forEach(function (sh) {
+    var c2 = String((sh.rows['2'] || {})[3] || ''), r8 = sh.rows['8'] || {}, wk = typeof (sh.rows['2'] || {})[5] === 'number' ? (sh.rows['2'] || {})[5] : 0;
+    if (/can ordering/i.test(c2)) {
+      kind = 'orora';
+      [5, 7, 9, 11, 13].forEach(function (col) {
+        if (typeof r8[col] !== 'number') return;
+        var date = serialToISO(r8[col]); if (date < from || date >= to) return;
+        for (var r = 9; r <= 30; r += 2) ['AM', 'PM'].forEach(function (slot, k) {
+          var row = sh.rows[String(r + k)] || {}, lab = (sh.rows[String(r)] || {})[2], sku = sheetSku(lab);
+          var pal = row[col], cans = row[col + 1];
+          if (!sku || !ITEM['cans:' + sku]) return;
+          if (!(typeof pal === 'number' && pal > 0) && !(typeof cans === 'number' && cans > 0)) return;
+          var qty = typeof cans === 'number' && cans > 0 ? cans : pal * state.params['cans:' + sku].perPallet;
+          var po = (sh.rows[slot === 'AM' ? '36' : '37'] || {})[col];
+          put('o|' + date + '|' + sku + '|' + slot, { itemId: 'cans:' + sku, qty: Math.round(qty), date: date, src: 'orora', po: po ? String(po) : '', slot: slot }, wk);
+        });
+      });
+    } else if (/cluster ordering/i.test(c2)) {
+      kind = 'cluster';
+      [4, 5].forEach(function (col) {
+        if (typeof r8[col] !== 'number') return;
+        var date = serialToISO(r8[col]); if (date < from || date >= to) return;
+        for (var r = 9; r <= 18; r++) {
+          var row = sh.rows[String(r)] || {}, sku = sheetSku(row[2]), pal = row[col];
+          if (!sku || !ITEM['clusters:' + sku] || !(typeof pal === 'number' && pal > 0)) continue;
+          var po = (sh.rows['19'] || {})[col];
+          put('c|' + date + '|' + sku, { itemId: 'clusters:' + sku, qty: Math.round(pal * state.params['clusters:' + sku].perPallet), date: date, src: 'cluster', po: po ? String(po) : '' }, wk);
+        }
+      });
+    }
+  });
+  if (!kind) throw new Error('Not an Orora Order Sheet or Cluster Wrap Order Sheet');
+  return { kind: kind, loads: Object.keys(found).map(function (k) { return found[k]; }) };
+}
+
+async function importDeliverySheets(files) {
+  var done = [], err = [];
+  TL = computeTL(state.countDate);
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    try {
+      toast('Reading ' + f.name + '…');
+      var res = await parseDeliverySheets(f);
+      if (state.sample) { state.open = []; state.sample = false; }
+      var from = state.settings.dueTodayOpen !== false ? state.countDate : addDays(state.countDate, 1);
+      state.open = state.open.filter(function (o) { return o.src !== res.kind; });
+      var n = 0;
+      res.loads.forEach(function (l) { if (l.date < from) return; l.id = state.uid++; state.open.push(l); n++; });
+      state.delMeta = state.delMeta || {};
+      state.delMeta[res.kind] = { name: f.name, at: todayISO(), n: n };
+      done.push((res.kind === 'orora' ? 'Orora' : 'Cluster') + ': ' + n + ' deliveries');
+    } catch (e) { err.push(f.name + ' — ' + (e && e.message ? e.message : e)); }
+  }
+  commit();
+  toast((done.length ? 'Loaded · ' + done.join(' · ') : '') + (err.length ? (done.length ? ' · ' : '') + 'Could not read ' + err.join('; ') : ''));
+}
+
 /* ------------------------------------------------------------------ events */
 function num(v) { var n = parseFloat(String(v).replace(/,/g, '')); return isFinite(n) ? n : 0; }
 
@@ -857,6 +959,7 @@ function onChange(e) {
       else state.params[it.id][f] = v || 1;
       break;
     case 'setting': state.settings[t.dataset.k] = Math.max(0, num(t.value)); if (t.dataset.k === 'clusterWeeks') state.settings.clusterWeeks = state.settings.clusterWeeks === 2 ? 2 : 1; if (t.dataset.k === 'casesPerPallet' && !state.settings.casesPerPallet) state.settings.casesPerPallet = 1; break;
+    case 'cdin': state.settings.dueTodayOpen = t.checked; break;
     case 'invcol': state.settings.invCol = t.value === 'total' ? 'total' : 'brewery'; break;
     case 'whole': state.settings.wholePallets = t.checked; break;
     case 'oqty': state.open.forEach(function (o) { if (String(o.id) === t.dataset.oid) o.qty = fromDisp(ITEM[o.itemId], Math.max(0, num(t.value))); }); break;
@@ -884,6 +987,8 @@ function onClick(e) {
       state.open.push({ id: state.uid++, itemId: id, qty: fromDisp(ITEM[id], q), date: d });
       break;
     }
+    case 'delpick': document.getElementById('delFile').click(); return;
+    case 'delclear': state.open = state.open.filter(function (o) { return !o.src; }); state.delMeta = {}; break;
     case 'invpick': document.getElementById('invFile').click(); return;
     case 'lbbpick': document.getElementById('lbbFile').click(); return;
     case 'lbbclear': state.lbbWeeks = []; state.lbbMeta = null; ALL_SKUS.forEach(function (k) { state.lbb[k] = {}; }); break;
@@ -969,6 +1074,7 @@ function init() {
     };
     rd.readAsText(f); e.target.value = '';
   });
+  document.getElementById('delFile').addEventListener('change', function (e) { var fs = Array.prototype.slice.call(e.target.files || []); e.target.value = ''; if (fs.length) importDeliverySheets(fs); });
   document.getElementById('invFile').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) importInventory(f); });
   document.getElementById('lbbFile').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) importLBB(f); });
   render();

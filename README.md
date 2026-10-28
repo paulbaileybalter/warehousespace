@@ -25,6 +25,7 @@ The password check covers every page and file. Prefer named-person logins? Use C
 
 - **Stock counted** (top right) is the date of your stocktake; the next Thursday order and the delivery week follow from it.
 - **Brew plan & stock → Upload stock spreadsheet** reads the NetSuite *Inventory – HOPS, YEAST, Grain, Packaging* export (the *Can -*, *Carton Empty -* and *Cluster -* rows) into the stock table and sets the stock date to today. Choose *Brewery On Hand only* (default) or *Total On Hand*. *On Order* quantities have no dates, so they are listed for reference only. Pallet pads are not in the report — enter them by hand.
+- **Brew plan & stock → Upload order sheets** takes the Orora Order Sheet and Cluster Wrap Order Sheet (both at once is fine). It lists every can load (22 pallets, with PO and AM/PM) and cluster delivery from the stock-count day up to the delivery week you are ordering for, under *Orders already on their way*, so they are counted in the plan. Deliveries dated for the week you are about to order are left out (that is the order the site is suggesting). Tabs whose dates are old (an unfilled template) are skipped. Re-upload each week; typed-in loads are kept.
 - **Brew plan & stock → Upload Live Brewery Board** reads the *Cartons* rows of each `WC …` tab (cases packed per day) from the
   current week onwards. The file is read in the browser and is never uploaded anywhere.
 - Enter the stock count and any orders already on their way, then work down the **Order desk**.
