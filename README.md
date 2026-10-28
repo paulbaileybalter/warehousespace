@@ -3,22 +3,24 @@
 A static website (HTML, CSS, JavaScript — no build step) for planning the Thursday order of
 **cartons, pallet pads, clusters and cans**, with a pallet-space check.
 
-## Deploy: GitHub → Cloudflare Pages, password protected
+## Deploy: GitHub → Cloudflare Worker, password protected
 
-1. Create a **private** GitHub repository and upload everything in this folder
-   (`index.html`, `styles.css`, `app.js`, `seed.js`, `logo.svg`, `favicon.svg`, `_headers`, `fonts/`, `functions/`).
-2. In Cloudflare: **Workers & Pages → Create → Pages → Connect to Git** and pick the repository.
-   - Framework preset: **None**
+The site is a Cloudflare **Worker** with static assets. `src/worker.js` checks the password, then serves the files in `public/`.
+Repository layout: `public/` (the site), `src/worker.js`, `wrangler.jsonc`, `README.md`.
+
+1. Create a **private** GitHub repository and upload everything in this folder (keep the folder structure).
+2. In Cloudflare: **Workers & Pages → Create → Import a repository** and pick the repository.
+   - Project/Worker name: `balter-ordering` (must match `name` in `wrangler.jsonc`)
    - Build command: *(leave empty)*
-   - Build output directory: `/` (or leave empty)
-3. After the first deploy, open the project → **Settings → Variables and Secrets** and add (Production, type *Secret*):
+   - Deploy command: `npx wrangler deploy` (the default)
+3. After the first deploy, open the Worker → **Settings → Variables and Secrets** and add (type *Secret*):
    - `SITE_PASSWORD` — the shared password (required)
    - `SITE_USER` — the username (optional, defaults to `balter`)
-4. **Redeploy** once so the variables take effect. Visiting the site now asks for the username and password
+   Adding a secret takes effect straight away. Visiting the site asks for the username and password
    (a browser sign-in box). If `SITE_PASSWORD` is missing the site stays locked rather than open.
+4. Every push to the repository redeploys the Worker.
 
-The password check lives in `functions/_middleware.js` and covers every page and file.
-Prefer named-person logins? Use Cloudflare Zero Trust → Access instead and delete the `functions` folder.
+The password check covers every page and file. Prefer named-person logins? Use Cloudflare Zero Trust → Access in front of the Worker.
 
 ## Using it
 
@@ -30,7 +32,7 @@ Prefer named-person logins? Use Cloudflare Zero Trust → Access instead and del
 - The pallet allowance (default 105, cartons + clusters) is changed in the **Pallet space** section.
   Can storage limits (90 comfortable / 104 maximum) are under the Cans card.
 - Figures are saved in the browser only. **Settings → Data → Export backup** moves them between computers.
-- `seed.js` holds the starting figures taken from the spreadsheets. Delete it (and its `<script>` line in `index.html`) to start blank.
+- `public/seed.js` holds the starting figures taken from the spreadsheets. Delete it (and its `<script>` line in `index.html`) to start blank.
 
 ## Ordering rules built in
 
