@@ -339,6 +339,22 @@ function analyse() {
 function chip(st, txt) { return '<span class="chip st-' + st + '"><i></i>' + txt + '</span>'; }
 function dispQty(it, units, dp) { return fmt(toDisp(it, units), dp == null ? (MAT[it.mat].entry === 'pallets' ? 2 : 0) : dp); }
 
+function uploadTiles() {
+  var dm = state.delMeta || {}, lb = state.lbbMeta, inv = state.invMeta;
+  var lbbOk = !!(lb && state.lbbWeeks.length && !/starting figures/i.test(lb.name || ''));
+  var items = [
+    { ok: !!dm.orora, act: 'delpick', name: 'Orora cans', file: dm.orora },
+    { ok: !!dm.cluster, act: 'delpick', name: 'Smurfit clusters', file: dm.cluster },
+    { ok: !!inv, act: 'invpick', name: 'Stock spreadsheet', sub: 'NetSuite', file: inv },
+    { ok: lbbOk, act: 'lbbpick', name: 'Live Brewery Board', file: lbbOk ? lb : null }
+  ];
+  return '<section class="uploads" aria-label="Uploads">' + items.map(function (t) {
+    return '<button type="button" class="upl ' + (t.ok ? 'ok' : 'no') + '" data-act="' + t.act + '" title="' + (t.ok ? 'Click to upload a newer file' : 'Click to upload') + '">' +
+      '<span class="uico" aria-hidden="true">' + (t.ok ? '✓' : '!') + '</span><span class="utx"><b>' + t.name + (t.sub ? ' <small>(' + t.sub + ')</small>' : '') + '</b>' +
+      '<span>' + (t.ok ? 'Uploaded ' + fMed(t.file.at) : 'Not uploaded — click to upload') + '</span></span></button>';
+  }).join('') + '</section>';
+}
+
 function hero(R) {
   var today = todayISO(), dd = diffDays(today, TL.orderDate);
   var rel = dd < 0 ? 'Order day has passed' : dd === 0 ? 'Order day is today' : dd === 1 ? 'Tomorrow' : 'In ' + dd + ' days';
@@ -723,7 +739,7 @@ function render() {
   var banner = state.sample ? '<div class="banner"><span><b>Starting figures loaded.</b> The brew schedule is from your Live Brewery Board; cluster and can stock are rolled forward from your order sheets to Wed 28 Oct; <b>cartons are placeholders</b>; pallet pads are your 28 Oct count (5,487). Replace the stock with today\'s count.</span><button class="btn small" data-act="clear">Clear starting figures</button></div>' : '';
   var cards = '<section class="sec" id="order"><div class="sec-head"><div><span class="eyebrow">Order desk</span><h2>Cartons, pallet pads, clusters &amp; cans</h2><p>Each tank shows stock against its minimum (dashed line). Suggested quantities are pre-filled — change any quantity or delivery day and the space check updates.</p></div></div>' +
     MAT_ORDER.map(function (mk) { return matCard(R, mk); }).join('') + '</section>';
-  app.innerHTML = banner + hero(R) + deliveryWeek(R) + cards + summarySection(R) + spaceSection(R) + planSection() + settingsSection();
+  app.innerHTML = banner + hero(R) + uploadTiles() + deliveryWeek(R) + cards + summarySection(R) + spaceSection(R) + planSection() + settingsSection();
   Array.prototype.forEach.call(app.querySelectorAll('details[data-ui]'), function (d) { var k = d.getAttribute('data-ui'); if (state.ui[k] != null) d.open = state.ui[k]; });
   document.getElementById('dateInput').value = state.countDate;
   if (fid) {

@@ -259,3 +259,17 @@ th.wk small{white-space:nowrap}
 .tiles>*{min-width:0}
 .tile .chip{white-space:normal;line-height:1.25}
 @media (max-width:720px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* upload status tiles */
+.uploads{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 0}
+.upl{display:flex;align-items:center;gap:10px;text-align:left;font:inherit;color:#000;cursor:pointer;padding:10px 12px;border-radius:var(--radius);border:1px solid;box-shadow:var(--shadow);transition:transform .12s}
+.upl:hover{transform:translateY(-1px)}
+.upl:focus-visible{outline:2px solid var(--purple);outline-offset:2px}
+.upl.ok{background:#47D7AC;border-color:#2fbf94}
+.upl.no{background:#FDAA63;border-color:#e98f3f}
+.upl .uico{flex:none;width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.55);display:grid;place-items:center;font-weight:700}
+.upl .utx{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.upl .utx b{font-size:13px}.upl .utx b small{font-weight:400}
+.upl .utx span{font-size:11.5px}
+@media (max-width:980px){.uploads{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media print{.uploads{display:none}}
