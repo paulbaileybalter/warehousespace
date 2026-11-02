@@ -28,9 +28,10 @@ var MAT = {
   clusters: { name: 'Clusters',    supplier: 'Smurfit Westrock', icon: 'cluster', space: true,  entry: 'pallets', unit: 'clusters', fixedDay: 2,    skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK'],
     rule: 'Smurfit Westrock · always arrives the Wednesday after you order · stock is kept to the end of the delivery week (one week ahead; two weeks is a setting)' },
   cans:     { name: 'Cans',        supplier: 'Orora',            icon: 'can',     space: false, entry: 'pallets', unit: 'cans',     fixedDay: null, skus: ['XPA', 'CPT', 'EAZY', 'HAZY', 'IPA', 'LPA', 'LIMITED', 'BLACK'],
-    rule: 'Orora · Mon–Fri mornings the week after you order · evening second load only if essential' }
+    rule: 'Orora · Mon–Fri mornings the week after you order · up to two truck loads (44 pallets) a day' }
 };
 var TRUCK = 22; // pallets per Orora truck
+var MAX_TRUCKS = 2; // Orora can deliver at most two truck loads (44 pallets) a day
 var STATUS_RANK = { ok: 0, watch: 1, order: 2, risk: 3 };
 var STATUS_TXT = { ok: 'Covered', watch: 'Order next week', order: 'Order this Thursday', risk: 'Run-out before delivery' };
 
@@ -240,22 +241,26 @@ function analyse() {
   canA.forEach(function (A) { A.parts = null; if (A.qty > 0 && A.dayEdited) addPart(A, A.day, palletsOf(A.it, A.qty)); });
   canA.filter(function (A) { return !A.dayEdited && A.qty > 0; }).sort(function (a, b) { return a.latestIdx - b.latestIdx || b.qty - a.qty; }).forEach(function (A) {
     var left = palletsOf(A.it, A.qty), k;
-    for (k = A.latestIdx; k >= 0 && left > 1e-9; k--) {
-      var d = TL.dwDays[k], room = Math.max(0, TRUCK - lid[d] - load[d]), take = A.locked ? Math.min(left, room) : Math.min(left, Math.floor(room + 1e-9));
-      if (take > 1e-9) { addPart(A, d, take); left -= take; }
+    for (var tr = 1; tr <= MAX_TRUCKS && left > 1e-9; tr++) { // fill each day's first truck before using a second
+      for (k = A.latestIdx; k >= 0 && left > 1e-9; k--) {
+        var d = TL.dwDays[k], room = Math.max(0, TRUCK * tr - lid[d] - load[d]), take = A.locked ? Math.min(left, room) : Math.min(left, Math.floor(room + 1e-9));
+        if (take > 1e-9) { addPart(A, d, take); left -= take; }
+      }
     }
-    if (left > 1e-9) { // no room anywhere in time: an extra truck on the latest possible day
-      var pick = A.latestIdx; for (k = A.latestIdx; k >= 0; k--) if (load[TL.dwDays[k]] < load[TL.dwDays[pick]]) pick = k;
-      addPart(A, TL.dwDays[pick], left);
+    for (k = 0; k < TL.dwDays.length && left > 1e-9; k++) { // no room in time: use later days (it will run out first, flagged), within the daily truck maximum
+      var d2 = TL.dwDays[k], room2 = Math.max(0, TRUCK * MAX_TRUCKS - lid[d2] - load[d2]), take2 = Math.min(left, A.locked ? room2 : Math.floor(room2 + 1e-9));
+      if (take2 > 1e-9) { addPart(A, d2, take2); left -= take2; }
     }
+    if (left > 1e-9) { var lp = 0; for (k = 1; k < TL.dwDays.length; k++) if (load[TL.dwDays[k]] < load[TL.dwDays[lp]]) lp = k; addPart(A, TL.dwDays[lp], left); }
   });
   R.truckInfo = {};
   TL.dwDays.forEach(function (d) {
-    var room = TRUCK - lid[d], info = { trucks: 0, short: 0, pulls: [], room: room };
+    var info = { trucks: 0, short: 0, pulls: [], over: false };
     R.truckInfo[d] = info;
-    if (load[d] <= 1e-9 || room <= 0) return;
-    info.trucks = Math.ceil(load[d] / room - 1e-9);
-    var short = Math.floor(info.trucks * room - load[d] + 1e-9);
+    if (load[d] <= 1e-9) return;
+    info.trucks = Math.max(1, Math.ceil((load[d] + lid[d]) / TRUCK - 1e-9));
+    info.over = info.trucks > MAX_TRUCKS;
+    var short = Math.floor(info.trucks * TRUCK - lid[d] - load[d] + 1e-9);
     while (short > 0) {
       var best = null, bestScore = Infinity;
       canA.forEach(function (A) {
@@ -269,7 +274,7 @@ function analyse() {
       var pl = info.pulls.filter(function (x) { return x.sku === best.it.label; })[0];
       if (pl) pl.pal += 1; else info.pulls.push({ sku: best.it.label, pal: 1 });
     }
-    info.short = Math.max(0, Math.round((info.trucks * room - load[d]) * 100) / 100);
+    info.short = Math.max(0, Math.round((info.trucks * TRUCK - lid[d] - load[d]) * 100) / 100);
   });
   canA.forEach(function (A) {
     if (!A.parts) return;
@@ -450,11 +455,12 @@ function matCard(R, mk) {
 function trucks(R) {
   var h = '<div class="trucks"><h4>' + icon('truck') + 'Truck fill · every truck is exactly ' + TRUCK + ' pallets</h4>';
   TL.dwDays.forEach(function (d) {
-    var e = R.events[d], pal = e.cans, lids = e.lids, ti = R.truckInfo[d], n = Math.max(1, ti.trucks), cap = n * TRUCK;
+    var e = R.events[d], pal = e.cans, lids = e.lids, ti = R.truckInfo[d], n = Math.max(1, ti.trucks), cap = Math.max(n, 1) * TRUCK;
     var note;
     if (pal <= 0) note = '<span class="muted">No cans</span>';
     else if (ti.short > 0) note = '<span class="warn-t">Needs ' + fmt(ti.short, 0) + ' more pallet' + (ti.short === 1 ? '' : 's') + ' to make a full ' + TRUCK + '-pallet truck</span> — add cans that are not due until later this week';
-    else if (n > 1) note = '<span class="warn-t">' + n + ' full trucks</span> — a second load is rare (evening only); consider moving some to another day';
+    else if (ti.over) note = '<span class="warn-t">' + n + ' trucks — over the ' + MAX_TRUCKS + '-truck (' + MAX_TRUCKS * TRUCK + ' pallet) daily maximum</span> — move some pallets to another day';
+    else if (n > 1) note = n + ' full trucks (' + n * TRUCK + ' pallets) — the daily maximum is ' + MAX_TRUCKS;
     else note = 'Full truck ✓';
     if (pal > 0 && ti.pulls.length) note += '<br><small>Topped up with ' + ti.pulls.map(function (x) { return fmt(x.pal, 0) + ' × ' + esc(x.sku); }).join(', ') + ' (due later)</small>';
     h += '<div class="trow"><strong>' + fMed(d) + '</strong><div class="bar" title="' + fmt(pal + lids, 1) + ' pallets">' +
@@ -463,7 +469,7 @@ function trucks(R) {
       '<div class="tnote">' + (pal > 0 ? '<b>' + fmt(pal, 1) + ' plt cans</b> · ' : '') + note + '</div></div>' +
       '<div class="trow" style="padding:0 0 6px"><span></span><label>Lids / other pallets on this truck <input type="number" min="0" step="1" class="cell-in" style="max-width:70px" value="' + (lids || '') + '" placeholder="0" data-act="lids" data-date="' + d + '" data-fid="lids:' + d + '"></label><span></span></div>';
   });
-  return h + '<p class="muted" style="font-size:11.5px;margin-top:4px">Orora trucks always carry ' + TRUCK + ' pallets. When the cans needed do not make a full truck, the site adds pallets of the cans that run short soonest after this week, so they arrive early. Blue = lids or other pallets sharing the truck (enter how many you are bringing). Type your own quantity on a line to override.</p></div>';
+  return h + '<p class="muted" style="font-size:11.5px;margin-top:4px">Orora trucks always carry ' + TRUCK + ' pallets and deliver at most ' + MAX_TRUCKS + ' loads (' + MAX_TRUCKS * TRUCK + ' pallets) a day. When the cans needed do not make a full truck, the site adds pallets of the cans that run short soonest after this week, so they arrive early. Blue = lids or other pallets sharing the truck (enter how many you are bringing). Type your own quantity on a line to override.</p></div>';
 }
 
 function canStore(R) {

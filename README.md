@@ -40,7 +40,7 @@ The password check covers every page and file. Prefer named-person logins? Use C
 | Material | Supplier | Order | Arrives | Cover target |
 |---|---|---|---|---|
 | Clusters | Smurfit Westrock | Thursday | following Wednesday | per-SKU minimum stock to the end of the week *after* delivery (Cluster Wrap Order Sheet) |
-| Cans | Orora | Thursday | Mon–Fri mornings the following week (evening second load only if essential) | as in the Orora Order Sheet: pallets required = 1.1 × planned production (Friday after the order day to the Monday after delivery week) − start-of-business stock; can stock comes from the sheet's own SOH block (setting lets you use NetSuite instead); the can-store check counts start-of-business stock. Every truck is exactly 22 pallets: part-loads are topped up with cans due later that week, and a SKU can be split across days |
+| Cans | Orora | Thursday | Mon–Fri mornings the following week (evening second load only if essential) | as in the Orora Order Sheet: pallets required = 1.1 × planned production (Friday after the order day to the Monday after delivery week) − start-of-business stock; can stock comes from the sheet's own SOH block (setting lets you use NetSuite instead); the can-store check counts start-of-business stock. Every truck is exactly 22 pallets and at most two trucks (44 pallets) arrive a day: part-loads are topped up with cans due later that week, and a SKU can be split across days |
 | Cartons | Visy | Thursday | any weekday the following week | handbook reorder-below level, order in batch sizes (SOP-008) |
 | Pallet pads | Visy | Thursday | any weekday the following week | order 6,000 when stock drops below 4,000 |
 
