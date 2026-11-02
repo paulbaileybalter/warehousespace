@@ -273,3 +273,4 @@ th.wk small{white-space:nowrap}
 .upl .utx span{font-size:11.5px}
 @media (max-width:980px){.uploads{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media print{.uploads{display:none}}
+.upl.drag{outline:3px dashed var(--purple);outline-offset:2px;transform:scale(1.02)}

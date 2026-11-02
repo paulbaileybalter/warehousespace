@@ -340,18 +340,23 @@ function chip(st, txt) { return '<span class="chip st-' + st + '"><i></i>' + txt
 function dispQty(it, units, dp) { return fmt(toDisp(it, units), dp == null ? (MAT[it.mat].entry === 'pallets' ? 2 : 0) : dp); }
 
 function uploadTiles() {
-  var dm = state.delMeta || {}, lb = state.lbbMeta, inv = state.invMeta;
-  var lbbOk = !!(lb && state.lbbWeeks.length && !/starting figures/i.test(lb.name || ''));
+  var dm = state.delMeta || {}, lb = state.lbbMeta, inv = state.invMeta, today = todayISO();
+  // last Thursday on or before today: the order sheets are updated each Thursday, the stock spreadsheet and Live Brewery Board daily
+  var thu = addDays(today, -((dow(today) - 4 + 7) % 7));
+  var lbbReal = lb && state.lbbWeeks.length && !/starting figures/i.test(lb.name || '') ? lb : null;
   var items = [
-    { ok: !!dm.orora, act: 'delpick', name: 'Orora cans', file: dm.orora },
-    { ok: !!dm.cluster, act: 'delpick', name: 'Smurfit clusters', file: dm.cluster },
-    { ok: !!inv, act: 'invpick', name: 'Stock spreadsheet', sub: 'NetSuite', file: inv },
-    { ok: lbbOk, act: 'lbbpick', name: 'Live Brewery Board', file: lbbOk ? lb : null }
+    { file: dm.orora, since: thu, due: 'Thursday', name: 'Orora cans', act: 'delpick' },
+    { file: dm.cluster, since: thu, due: 'Thursday', name: 'Smurfit clusters', act: 'delpick' },
+    { file: inv, since: today, due: 'daily', name: 'Stock spreadsheet', sub: 'NetSuite', act: 'invpick' },
+    { file: lbbReal, since: today, due: 'daily', name: 'Live Brewery Board', act: 'lbbpick' }
   ];
   return '<section class="uploads" aria-label="Uploads">' + items.map(function (t) {
-    return '<button type="button" class="upl ' + (t.ok ? 'ok' : 'no') + '" data-act="' + t.act + '" title="' + (t.ok ? 'Click to upload a newer file' : 'Click to upload') + '">' +
-      '<span class="uico" aria-hidden="true">' + (t.ok ? '✓' : '!') + '</span><span class="utx"><b>' + t.name + (t.sub ? ' <small>(' + t.sub + ')</small>' : '') + '</b>' +
-      '<span>' + (t.ok ? 'Uploaded ' + fMed(t.file.at) : 'Not uploaded — click to upload') + '</span></span></button>';
+    var fresh = !!(t.file && t.file.at >= t.since), line;
+    if (fresh) line = 'Up to date · uploaded ' + fMed(t.file.at);
+    else if (t.file) line = 'Out of date · last uploaded ' + fMed(t.file.at) + ' (updated ' + t.due + ')';
+    else line = 'Not uploaded (updated ' + t.due + ')';
+    return '<button type="button" class="upl ' + (fresh ? 'ok' : 'no') + '" data-act="' + t.act + '" data-drop="' + t.act + '" title="' + (fresh ? 'Click, or drop a file here, to upload a newer one' : 'Click, or drop a file here, to upload') + '">' +
+      '<span class="uico" aria-hidden="true">' + (fresh ? '✓' : '!') + '</span><span class="utx"><b>' + t.name + (t.sub ? ' <small>(' + t.sub + ')</small>' : '') + '</b><span>' + line + '</span></span></button>';
   }).join('') + '</section>';
 }
 
@@ -1141,6 +1146,18 @@ function init() {
       catch (err) { toast('That file is not a Balter ordering backup'); }
     };
     rd.readAsText(f); e.target.value = '';
+  });
+  var dropTarget = function (e) { return e.target.closest ? e.target.closest('[data-drop]') : null; };
+  var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0; };
+  ['dragenter', 'dragover'].forEach(function (ev) { window.addEventListener(ev, function (e) { if (!hasFiles(e)) return; e.preventDefault(); var t = dropTarget(e); Array.prototype.forEach.call(document.querySelectorAll('.upl.drag'), function (x) { if (x !== t) x.classList.remove('drag'); }); if (t) { t.classList.add('drag'); e.dataTransfer.dropEffect = 'copy'; } else e.dataTransfer.dropEffect = 'none'; }); });
+  window.addEventListener('dragleave', function (e) { if (!e.relatedTarget) Array.prototype.forEach.call(document.querySelectorAll('.upl.drag'), function (x) { x.classList.remove('drag'); }); });
+  window.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return; e.preventDefault();
+    Array.prototype.forEach.call(document.querySelectorAll('.upl.drag'), function (x) { x.classList.remove('drag'); });
+    var t = dropTarget(e), fs = Array.prototype.slice.call(e.dataTransfer.files || []);
+    if (!t || !fs.length) return;
+    var k = t.getAttribute('data-drop');
+    if (k === 'delpick') importDeliverySheets(fs); else if (k === 'invpick') importInventory(fs[0]); else if (k === 'lbbpick') importLBB(fs[0]);
   });
   document.getElementById('delFile').addEventListener('change', function (e) { var fs = Array.prototype.slice.call(e.target.files || []); e.target.value = ''; if (fs.length) importDeliverySheets(fs); });
   document.getElementById('invFile').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) importInventory(f); });
