@@ -84,8 +84,8 @@ function defParams(it) {
 }
 
 function blankState() {
-  var s = { v: 2, capacity: 105, countDate: todayISO(), sample: false, params: {}, stock: {}, plan: {}, lbb: {}, lbbWeeks: [], lbbMeta: null, invMeta: null, invOnOrder: {}, delMeta: {},  open: [], orders: {}, ordersFor: '', lids: {}, viewDate: null, uid: 1,
-    settings: { dueTodayOpen: true, clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 90 }, ui: {} };
+  var s = { v: 2, capacity: 105, countDate: todayISO(), sample: false, params: {}, stock: {}, plan: {}, lbb: {}, lbbWeeks: [], lbbMeta: null, invMeta: null, invOnOrder: {}, delMeta: {}, canSOH: null,  open: [], orders: {}, ordersFor: '', lids: {}, viewDate: null, uid: 1,
+    settings: { dueTodayOpen: true, clusterWeeks: 1, invCol: 'brewery', casesPerPallet: 60, padsPerPallet: 1, wholePallets: false, canSoft: 90, canMax: 104 }, ui: {} };
   ITEMS.forEach(function (it) { s.params[it.id] = defParams(it); s.stock[it.id] = 0; });
   ALL_SKUS.forEach(function (k) { s.plan[k] = {}; s.lbb[k] = {}; });
   return s;
@@ -116,7 +116,7 @@ function normalise(j) {
   var b = blankState(), s = Object.assign(b, j || {});
   s.settings = Object.assign(blankState().settings, (j && j.settings) || {});
   s.ui = s.ui || {};
-  if (s.settings.canMax === 104) s.settings.canMax = 90; // can store limit is 90 pallets
+  if (s.settings.canMax <= s.settings.canSoft) s.settings.canMax = 104; // aim 90, physical limit 104
   if (j && j.params && j.params['pads:all'] && !j.params['pads:all'].perPallet) delete j.params['pads:all'].perPallet;
   ITEMS.forEach(function (it) {
     s.params[it.id] = Object.assign(defParams(it), (j && j.params && j.params[it.id]) || {});
@@ -203,11 +203,13 @@ function analyse() {
     state.open.forEach(function (o) { if (o.itemId === it.id) dels[o.date] = (dels[o.date] || 0) + o.qty; });
     A.dels = dels;
     A.base = sim(it, p, dels);
-    var coverDate = it.mat === 'clusters' ? TL.coverC : TL.cover;
+    var coverDate = it.mat === 'clusters' ? TL.coverC : it.mat === 'cans' ? addDays(TL.dw, 7) : TL.cover;
     var earliest = m.fixedDay != null ? TL.wed : TL.dw;
     A.coverDate = coverDate;
     A.endCover = A.base[TL.idx[coverDate]].end;
-    var useToCover = 0; A.base.forEach(function (r) { if (diffDays(r.date, coverDate) >= 0) useToCover += r.use; });
+    // cans follow the Orora sheet: buffer = % of production from the Friday after the order day to the Monday after delivery week
+    var winFrom = it.mat === 'cans' ? addDays(TL.orderDate, 1) : TL.cd;
+    var useToCover = 0; A.base.forEach(function (r) { if (diffDays(r.date, coverDate) >= 0 && diffDays(winFrom, r.date) >= 0) useToCover += r.use; });
     A.min = p.min + (p.minPct || 0) / 100 * useToCover;
     var ro = A.base.filter(function (r) { return r.end < -0.5; })[0];
     A.runout = ro ? ro.date : null;
@@ -217,7 +219,7 @@ function analyse() {
     A.sug = A.need > 0.5 ? Math.ceil(A.need / p.step - 1e-9) * p.step : 0;
     A.latestIdx = 0;
     if (m.fixedDay == null) {
-      for (var k = 4; k >= 0; k--) { var prev = addDays(TL.dwDays[k], -1); if (A.base[TL.idx[prev]].end >= A.avgDaily) { A.latestIdx = k; break; } }
+      for (var k = 4; k >= 0; k--) { var prev = addDays(TL.dwDays[k], -1); if (A.base[TL.idx[prev]].end >= (it.mat === 'cans' ? p.perPallet : A.avgDaily)) { A.latestIdx = k; break; } }
     }
     A.nextUse = 0; for (var q = 1; q <= 7; q++) { var rr = A.base[TL.idx[addDays(coverDate, q)]]; if (rr) A.nextUse += rr.use; }
     A.locked = (state.orders[it.id] || {}).qty != null;
@@ -302,7 +304,7 @@ function analyse() {
       if (it.mat === 'cartons') { c += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
       else if (it.mat === 'clusters') { k += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
       else if (it.mat === 'pads') { pd += palSpace(it, r.peak); arr += r.del / state.params[it.id].perPallet; }
-      else if (it.mat === 'cans') cn += palSpace(it, r.peak);
+      else if (it.mat === 'cans') cn += palSpace(it, r.peak - r.del); // start-of-business stock, as in the Orora sheet's Total Storage rows
     });
     R.space.push({ date: d, c: c, k: k, p: pd, total: c + k + pd, arr: arr });
     R.cansStore.push({ date: d, total: cn });
@@ -313,13 +315,13 @@ function analyse() {
   R.view = state.viewDate && TL.idx[state.viewDate] != null ? R.space[TL.idx[state.viewDate]] : peak;
   var cap = state.capacity;
   // cartons, clusters and pads that do not fit the allowance may use free pallet spaces in the can store
-  R.space.forEach(function (r, i) { r.spill = Math.max(0, r.total - cap); r.canFree = Math.max(0, state.settings.canMax - R.cansStore[i].total); r.short = Math.max(0, r.spill - r.canFree); });
+  R.space.forEach(function (r, i) { r.spill = Math.max(0, r.total - cap); r.canFree = Math.max(0, state.settings.canSoft - R.cansStore[i].total); r.hardFree = Math.max(0, state.settings.canMax - R.cansStore[i].total); r.short = Math.max(0, r.spill - r.hardFree); });
   var wkd = function (r) { var w = dow(r.date); return w > 0 && w < 6; };
   R.spillDays = R.space.filter(function (r) { return wkd(r) && r1(r.spill) > 0; });
   R.shortDays = R.space.filter(function (r) { return wkd(r) && r1(r.short) > 0; });
   R.spaceStatus = R.shortDays.length ? 'order' : R.spillDays.length || R.peak.total >= cap * 0.9 ? 'watch' : 'ok';
   R.overDays = R.space.filter(function (r) { var w = dow(r.date); return w > 0 && w < 6 && r1(r.total) > cap; });
-  R.canStatus = R.canPeak.total > state.settings.canMax ? 'order' : R.canPeak.total >= state.settings.canMax * 0.9 || R.spillDays.length ? 'watch' : 'ok';
+  R.canStatus = R.canPeak.total > state.settings.canMax ? 'order' : R.canPeak.total > state.settings.canSoft || R.spillDays.length ? 'watch' : 'ok';
 
   // 5. what lands each day of the delivery week
   TL.dwDays.forEach(function (d) { R.events[d] = { smurfit: 0, cartons: 0, pads: 0, cans: 0, spaceIn: 0, lids: Number(state.lids[d]) || 0 }; });
@@ -377,7 +379,7 @@ function hero(R) {
   h += '<a class="tile st-' + sp + '" href="#space"><span class="ico">' + icon('glass') + '</span><h3>Pallet space</h3>' +
     chip(sp, sp === 'order' ? 'Over allowance — no room left' : R.spillDays.length ? 'Using can-store space' : sp === 'watch' ? 'Nearly full' : 'Room to spare') + '<p>Peak ' + fmt(R.peak.total, 1) + ' of ' + state.capacity + ' pallets (' + fMed(R.peak.date) + ')</p></a>' +
     '<a class="tile st-' + R.canStatus + '" href="#mat-cans"><span class="ico">' + icon('can') + '</span><h3>Can store</h3>' +
-    chip(R.canStatus, R.canStatus === 'order' ? 'Over the limit' : R.spillDays.length ? 'Sharing space' : R.canStatus === 'watch' ? 'Close to the limit' : 'Within the limit') + '<p>Peak ' + fmt(R.canPeak.total, 1) + ' pallets (limit ' + state.settings.canMax + ')</p></a></div></section>';
+    chip(R.canStatus, R.canStatus === 'order' ? 'Over the physical limit' : R.canPeak.total > state.settings.canSoft ? 'Over the ' + state.settings.canSoft + ' aim' : R.spillDays.length ? 'Sharing space' : 'Within the aim') + '<p>Peak ' + fmt(R.canPeak.total, 1) + ' pallets (aim ' + state.settings.canSoft + ', limit ' + state.settings.canMax + ')</p></a></div></section>';
   return h;
 }
 
@@ -438,7 +440,7 @@ function matCard(R, mk) {
   h += '<div class="tbl-wrap"><table><thead><tr><th>' + (mk === 'pads' ? 'Item' : 'SKU') + '</th><th class="r">On hand</th><th>Runs out</th><th class="r">Suggested</th><th>Order</th><th class="r">Pallets</th><th>Deliver on</th><th>After this order</th></tr></thead><tbody>';
   its.forEach(function (A) { h += orderRow(R, A); });
   h += '</tbody></table></div>';
-  var coverTxt = mk === 'clusters' ? (state.settings.clusterWeeks === 2 ? 'the end of the week after delivery (' : 'the end of delivery week (') + fMed(TL.coverC) + ')' : 'the end of delivery week (' + fMed(TL.cover) + ')';
+  var coverTxt = mk === 'clusters' ? (state.settings.clusterWeeks === 2 ? 'the end of the week after delivery (' : 'the end of delivery week (') + fMed(TL.coverC) + ')' : (mk === 'cans' ? 'the Monday after delivery week (' + fMed(addDays(TL.dw, 7)) : 'the end of delivery week (' + fMed(TL.cover)) + ')';
   var minTxt = mk === 'cans' ? 'the minimum is a ' + (its[0].p.minPct || 0) + '% buffer on planned use' : 'at or above its minimum';
   h += '<div class="mat-foot"><span>Suggestions keep stock ' + (mk === 'cans' ? 'covering planned use plus ' + (its[0].p.minPct || 0) + '% buffer' : minTxt) + ' to ' + coverTxt + '. Change any quantity or day.</span><button class="btn small" data-act="resetmat" data-mat="' + mk + '">Reset to suggestions</button></div>';
   if (mk === 'cans') h += trucks(R) + canStore(R);
@@ -466,10 +468,10 @@ function trucks(R) {
 
 function canStore(R) {
   var s = state.settings, pk = R.canPeak;
-  var h = '<div class="trucks" style="border-top:1px solid var(--line);padding-top:14px"><h4>' + icon('can') + 'Can store · ' + fmt(pk.total, 1) + ' pallets at the delivery-week peak (' + fMed(pk.date) + ') ' +
-    chip(R.canStatus, R.canStatus === 'order' ? 'Over maximum' : R.canStatus === 'watch' ? 'Over comfortable limit' : 'Within limits') + '</h4>' +
-    '<div class="chart-wrap" style="padding:0">' + barChart(R, { stacks: [{ color: '#47D7AC', get: function (i) { return R.cansStore[i].total; } }], lines: [{ v: s.canMax, label: 'Limit ' + s.canMax, dash: true }], overAt: s.canMax, aria: 'Projected can storage in pallets each weekday' }) + '</div>' +
-    '<div class="row" style="margin-top:6px;font-size:12px"><label class="muted">Can store limit <input type="number" class="cell-in" min="1" value="' + s.canMax + '" data-act="setting" data-k="canMax" data-fid="s:canMax" style="max-width:76px"></label><span class="muted">pallets for cans alone</span></div></div>';
+  var h = '<div class="trucks" style="border-top:1px solid var(--line);padding-top:14px"><h4>' + icon('can') + 'Can store · ' + fmt(pk.total, 1) + ' pallets at the delivery-week peak, start of business (' + fMed(pk.date) + ') ' +
+    chip(R.canStatus, R.canStatus === 'order' ? 'Over the ' + s.canMax + ' limit' : pk.total > s.canSoft ? 'Over the ' + s.canSoft + ' aim' : R.spillDays.length ? 'Sharing space' : 'Within the aim') + '</h4>' +
+    '<div class="chart-wrap" style="padding:0">' + barChart(R, { stacks: [{ color: '#47D7AC', get: function (i) { return R.cansStore[i].total; } }], lines: [{ v: s.canSoft, label: 'Aim ' + s.canSoft, dash: true }, { v: s.canMax, label: 'Limit ' + s.canMax, dash: false, orange: true }], overAt: s.canMax, aria: 'Projected can storage in pallets at the start of each weekday' }) + '</div>' +
+    '<div class="row" style="margin-top:6px;font-size:12px"><label class="muted">Aim <input type="number" class="cell-in" min="1" value="' + s.canSoft + '" data-act="setting" data-k="canSoft" data-fid="s:canSoft" style="max-width:76px"></label><label class="muted">True limit <input type="number" class="cell-in" min="1" value="' + s.canMax + '" data-act="setting" data-k="canMax" data-fid="s:canMax" style="max-width:76px"></label><span class="muted">pallets for cans alone</span></div></div>';
   return h;
 }
 
@@ -545,7 +547,7 @@ function spaceSection(R) {
   var wk = TL.days.filter(function (d) { var w = dow(d); return w > 0 && w < 6; });
   var den = Math.max(v.total, cap);
   var h = '<section class="sec" id="space"><div class="sec-head"><div><span class="eyebrow">Pallet space</span><h2>How full is the cellar?</h2>' +
-    '<p>Cartons, clusters and pallet pads share one pallet allowance. Cans have their own store of 90 pallets (shown under Cans above); if cartons, clusters and pads overflow, spare can-store spaces are used.</p></div></div>' +
+    '<p>Cartons, clusters and pallet pads share one pallet allowance. Cans have their own store (aim 90 pallets, physical limit 104, shown under Cans above); if cartons, clusters and pads overflow, spare can-store spaces are used.</p></div></div>' +
     '<div class="panel"><div class="space-grid"><div>' + glassSVG(frac, over, cap) + '</div><div>' +
     '<div class="caprow"><label for="capInput">Pallet space allowance (cartons, clusters + pads)</label>' +
     '<button class="btn step" data-act="capstep" data-d="-5" aria-label="Minus 5">−5</button><button class="btn step" data-act="capstep" data-d="-1" aria-label="Minus 1">−1</button>' +
@@ -561,10 +563,10 @@ function spaceSection(R) {
     '<div class="chart-leg"><span><i style="background:var(--purple)"></i>Cartons</span><span><i style="background:var(--sky)"></i>Clusters</span><span><i class="dash"></i>Allowance</span><span><i style="background:#fff;border:3px solid var(--orange)"></i>Over allowance</span><span>▲ delivery arrives</span><span>Click a bar to show it in the glass</span></div>';
   if (R.shortDays.length) {
     var worst = R.shortDays.reduce(function (a, b) { return b.short > a.short ? b : a; });
-    h += '<p class="note"><span class="warn-t">Does not fit on ' + R.shortDays.length + ' weekday' + (R.shortDays.length > 1 ? 's' : '') + ', even using spare can-store space</span> — worst is ' + fMed(worst.date) + ': ' + fmt(worst.total, 1) + ' pallets against ' + cap + ' (+ ' + fmt(worst.canFree, 1) + ' free in the can store), short by ' + fmt(worst.short, 1) + '. Trim a carton, cluster or pad order, move a Visy delivery later in the week, or raise the allowance.</p>';
+    h += '<p class="note"><span class="warn-t">Does not fit on ' + R.shortDays.length + ' weekday' + (R.shortDays.length > 1 ? 's' : '') + ', even using spare can-store space</span> — worst is ' + fMed(worst.date) + ': ' + fmt(worst.total, 1) + ' pallets against ' + cap + ' (+ ' + fmt(worst.hardFree, 1) + ' free in the can store up to its ' + state.settings.canMax + ' limit), short by ' + fmt(worst.short, 1) + '. Trim a carton, cluster or pad order, move a Visy delivery later in the week, or raise the allowance.</p>';
   } else if (R.spillDays.length) {
     var w2 = R.spillDays.reduce(function (a, b) { return b.spill > a.spill ? b : a; });
-    h += '<p class="note"><span class="warn-t">Over the ' + cap + '-pallet allowance on ' + R.spillDays.length + ' weekday' + (R.spillDays.length > 1 ? 's' : '') + '</span> — worst is ' + fMed(w2.date) + ' at ' + fmt(w2.total, 1) + ' pallets. The extra ' + fmt(w2.spill, 1) + ' fits in spare can-store space (' + fmt(w2.canFree, 1) + ' free that day).</p>';
+    h += '<p class="note"><span class="warn-t">Over the ' + cap + '-pallet allowance on ' + R.spillDays.length + ' weekday' + (R.spillDays.length > 1 ? 's' : '') + '</span> — worst is ' + fMed(w2.date) + ' at ' + fmt(w2.total, 1) + ' pallets. The extra ' + fmt(w2.spill, 1) + ' fits in can-store space (' + fmt(w2.canFree, 1) + ' free under the ' + state.settings.canSoft + '-pallet aim' + (w2.spill > w2.canFree ? ', so it goes above the aim but within the ' + state.settings.canMax + ' limit' : '') + ').</p>';
   } else h += '<p class="note">✓ Everything fits within the ' + cap + '-pallet allowance for the whole planning window.</p>';
   h += '<div class="tbl-wrap"><table><thead><tr><th>Delivery week</th><th class="r">Cartons in (plt)</th><th class="r">Clusters in (plt)</th><th class="r">Pads in (plt)</th><th class="r">On site after deliveries</th><th class="r">Free</th></tr></thead><tbody>';
   TL.dwDays.forEach(function (d) {
@@ -580,28 +582,9 @@ function spaceSection(R) {
 function planSection() {
   var wks = TL.weeks, meta = state.lbbMeta;
   var h = '<section class="sec" id="inputs"><div class="sec-head"><div><span class="eyebrow">Brew plan &amp; stock</span><h2>What the numbers are built from</h2>' +
-    '<p>The brew schedule comes from the Live Brewery Board; the stock count and any orders already on their way are entered here. Everything above updates straight away.</p></div></div>';
+    '<p>The brew schedule, stock count and orders already on their way come from the four uploads at the top of the page; you can also type or adjust figures here. Everything above updates straight away.</p></div></div>';
 
-  var dm = state.delMeta || {};
-  h += '<div class="panel" style="margin-bottom:14px"><div class="pad"><div class="row" style="justify-content:space-between;align-items:flex-start"><div style="max-width:660px"><h3 style="font-size:15px">Orora &amp; cluster order sheets — what is coming and when</h3>' +
-    '<p class="muted" style="font-size:12.5px;margin-top:3px">Upload the <b>Orora Order Sheet</b> and the <b>Cluster Wrap Order Sheet</b> (select both at once, or one at a time). The site reads each week\'s tab and lists every can load (with PO and AM/PM) and cluster delivery from the stock-count day up to the delivery week you are about to order for. Re-uploading replaces the earlier sheet figures; loads you typed in yourself are kept. Can loads are 22 pallets.</p>' +
-    '<label class="row" style="margin-top:8px;font-size:12.5px;gap:8px"><input type="checkbox" data-act="cdin" data-fid="s:cdin"' + (state.settings.dueTodayOpen !== false ? ' checked' : '') + ' style="width:16px;height:16px;accent-color:var(--purple)"> Include deliveries due on the stock-count day <span class="muted">(untick if they are already in the stock spreadsheet)</span></label>' +
-    ['orora', 'cluster'].map(function (k) { var m = dm[k]; return '<p style="font-size:12.5px;margin-top:8px">' + (m ? chip('ok', 'Loaded') + ' <b>' + esc(m.name) + '</b> · ' + m.n + ' deliveries · uploaded ' + fMed(m.at) : chip('watch', 'Not loaded') + ' ' + (k === 'orora' ? 'Orora Order Sheet' : 'Cluster Wrap Order Sheet')) + '</p>'; }).join('') +
-    '</div><div class="row"><button class="btn teal" data-act="delpick">Upload order sheets (.xlsx)</button>' + (state.open.some(function (o) { return o.src; }) ? '<button class="btn" data-act="delclear">Remove sheet deliveries</button>' : '') + '</div></div></div></div>';
-
-  var im = state.invMeta, oo = state.invOnOrder || {}, ooKeys = Object.keys(oo).filter(function (id) { return ITEM[id] && oo[id] > 0; });
-  h += '<div class="panel" style="margin-bottom:14px"><div class="pad"><div class="row" style="justify-content:space-between;align-items:flex-start"><div style="max-width:660px"><h3 style="font-size:15px">Stock spreadsheet (NetSuite inventory)</h3>' +
-    '<p class="muted" style="font-size:12.5px;margin-top:3px">Upload the <b>Inventory – HOPS, YEAST, Grain, Packaging</b> export each time. The <b>Can</b>, <b>Carton Empty</b> and <b>Cluster</b> rows fill the stock table below and the stock date is set to today. Pallet pads are not in that report, so enter them by hand. The file is read in your browser and is not sent anywhere.</p>' +
-    '<label class="fld" style="max-width:300px;margin-top:8px"><span>Count stock from</span><select data-act="invcol" data-fid="s:invcol"><option value="brewery"' + (state.settings.invCol !== 'total' ? ' selected' : '') + '>Brewery On Hand only</option><option value="total"' + (state.settings.invCol === 'total' ? ' selected' : '') + '>Total On Hand (incl. Be Cool and Credit Return)</option></select></label>' +
-    (im ? '<p style="font-size:12.5px;margin-top:8px">' + chip('ok', 'Loaded') + ' <b>' + esc(im.name) + '</b> · ' + im.n + ' items · uploaded ' + fMed(im.at) + '</p>' : '<p style="font-size:12.5px;margin-top:8px">' + chip('watch', 'Not loaded') + ' Using the stock figures entered below.</p>') +
-    (ooKeys.length ? '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12.5px">On order per NetSuite (no arrival dates) — for reference</summary><p class="muted" style="font-size:11.5px;margin:6px 0">These have no delivery dates, so they are not counted. Add the ones still to arrive under <b>Orders already on their way</b> with their date.</p><div style="font-size:12.5px;columns:2;column-gap:24px">' +
-      ooKeys.map(function (id) { var it = ITEM[id]; return '<div>' + MAT[it.mat].name + ' ' + (it.sku ? SKU_LABEL[it.sku] : '') + ': <b>' + fmt(oo[id]) + '</b></div>'; }).join('') + '</div></details>' : '') +
-    '</div><div class="row"><button class="btn teal" data-act="invpick">Upload stock spreadsheet (.xlsx)</button></div></div></div></div>';
-
-  h += '<div class="panel" style="margin-bottom:14px"><div class="pad"><div class="row" style="justify-content:space-between;align-items:flex-start"><div style="max-width:660px"><h3 style="font-size:15px">Live Brewery Board</h3>' +
-    '<p class="muted" style="font-size:12.5px;margin-top:3px">Upload the Live Brewery Board workbook. The site reads the <b>Cartons</b> rows of each <b>WC</b> tab (cases packed per day, weekends included) from this week onwards — the same schedule the Orora and cluster order sheets are built from. The file is read in your browser and is not sent anywhere.</p>' +
-    (meta ? '<p style="font-size:12.5px;margin-top:8px">' + chip('ok', 'Loaded') + ' <b>' + esc(meta.name) + '</b> · weeks commencing ' + state.lbbWeeks.slice().sort().map(fShort).join(', ') + '</p>' : '<p style="font-size:12.5px;margin-top:8px">' + chip('watch', 'Not loaded') + ' Using the weekly figures below.</p>') +
-    '</div><div class="row"><button class="btn teal" data-act="lbbpick">Upload Live Brewery Board (.xlsx)</button>' + (state.lbbWeeks.length ? '<button class="btn" data-act="lbbclear">Remove schedule</button>' : '') + '</div></div></div></div>';
+  var oo = state.invOnOrder || {}, ooKeys = Object.keys(oo).filter(function (id) { return ITEM[id] && oo[id] > 0; });
 
   h += '<details class="panel" open data-ui="plan"><summary>Cases packed per week <small>one case = 1 carton, 4 clusters, 16 cans · weeks from the Live Brewery Board are read-only</small></summary><div class="panel-body"><div class="tbl-wrap" style="padding:0"><table><thead><tr><th>SKU</th>';
   wks.forEach(function (w) {
@@ -638,7 +621,8 @@ function planSection() {
   h += '</tbody></table></div><div class="row" style="margin-top:12px"><label class="fld" style="max-width:240px"><span>Pallet pads on hand (pads)</span><input type="number" min="0" step="50" value="' + (state.stock[pit.id] || '') + '" placeholder="0" data-act="stock" data-id="pads:all" data-fid="stock:pads:all"></label></div>' +
     '<p class="muted" style="font-size:11.5px;margin-top:8px">Count on the Wednesday and include Thursday and Friday deliveries that are still to arrive in <b>Orders already on their way</b> below (as in the order SOPs).</p></div></details>';
 
-  h += '<details class="panel" style="margin-top:14px" open data-ui="open"><summary>Orders already on their way <small>placed on earlier Thursdays and not yet delivered</small></summary><div class="panel-body"><div class="tbl-wrap" style="padding:0"><table><thead><tr><th>Item</th><th class="r">Quantity</th><th class="r">PO</th><th>Arrives</th><th></th></tr></thead><tbody>';
+  h += '<details class="panel" style="margin-top:14px" open data-ui="open"><summary>Orders already on their way <small>placed on earlier Thursdays and not yet delivered</small></summary><div class="panel-body">' + (ooKeys.length ? '<details style="margin:0 0 10px"><summary style="cursor:pointer;font-size:12.5px">On order per NetSuite (no arrival dates) — for reference</summary><p class="muted" style="font-size:11.5px;margin:6px 0">These have no delivery dates, so they are not counted. Add the ones still to arrive under <b>Orders already on their way</b> with their date.</p><div style="font-size:12.5px;columns:2;column-gap:24px">' +
+      ooKeys.map(function (id) { var it = ITEM[id]; return '<div>' + MAT[it.mat].name + ' ' + (it.sku ? SKU_LABEL[it.sku] : '') + ': <b>' + fmt(oo[id]) + '</b></div>'; }).join('') + '</div></details>' : '') + '<div class="tbl-wrap" style="padding:0"><table><thead><tr><th>Item</th><th class="r">Quantity</th><th class="r">PO</th><th>Arrives</th><th></th></tr></thead><tbody>';
   var opens = state.open.slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
   if (!opens.length) h += '<tr><td colspan="5" class="muted">Nothing on the way. Add anything that is still to be delivered so it is counted.</td></tr>';
   opens.forEach(function (o) {
@@ -677,6 +661,9 @@ function settingsSection() {
   });
   h += '</tbody></table></div><div class="grid2" style="margin-top:14px"><label class="fld"><span><span class="src ph">Check</span> Cases per finished pallet</span><input type="number" min="1" value="' + s.casesPerPallet + '" data-act="setting" data-k="casesPerPallet" data-fid="s:cpp"></label>' +
     '<label class="fld"><span><span class="src ph">Check</span> Pallet pads used per finished pallet</span><input type="number" min="0" step="any" value="' + s.padsPerPallet + '" data-act="setting" data-k="padsPerPallet" data-fid="s:ppp"></label></div>' +
+    '<div class="grid2" style="margin-top:12px"><label class="fld"><span>Can stock comes from</span><select data-act="cansrc" data-fid="s:cansrc"><option value="orora"' + (s.canStockFrom !== 'netsuite' ? ' selected' : '') + '>Orora sheet start-of-business stock (as in your order sheet)</option><option value="netsuite"' + (s.canStockFrom === 'netsuite' ? ' selected' : '') + '>NetSuite stock spreadsheet</option></select></label></div>' +
+    '<div class="grid2" style="margin-top:12px"><label class="fld"><span>Stock spreadsheet: count stock from</span><select data-act="invcol" data-fid="s:invcol"><option value="brewery"' + (s.invCol !== 'total' ? ' selected' : '') + '>Brewery On Hand only</option><option value="total"' + (s.invCol === 'total' ? ' selected' : '') + '>Total On Hand (incl. Be Cool and Credit Return)</option></select></label></div>' +
+    '<label class="row" style="margin-top:12px;font-size:13px"><input type="checkbox" data-act="cdin" data-fid="s:cdin"' + (s.dueTodayOpen !== false ? ' checked' : '') + ' style="width:16px;height:16px;accent-color:var(--purple)"> Order sheets: include deliveries due on the stock-count day <span class="muted">(untick if they are already in the stock spreadsheet)</span></label>' +
     '<div class="grid2" style="margin-top:12px"><label class="fld"><span>Clusters: how far ahead to cover</span><select data-act="setting" data-k="clusterWeeks" data-fid="s:cw"><option value="1"' + (s.clusterWeeks !== 2 ? ' selected' : '') + '>One week (to end of delivery week)</option><option value="2"' + (s.clusterWeeks === 2 ? ' selected' : '') + '>Two weeks (to end of the week after)</option></select></label></div>' +
     '<label class="row" style="margin-top:14px;font-size:13px"><input type="checkbox" data-act="whole" data-fid="s:whole"' + (s.wholePallets ? ' checked' : '') + ' style="width:16px;height:16px;accent-color:var(--purple)"> Count part-pallets as whole pallets in the space check <span class="muted">(a part-pallet still takes a floor position; off = matches your order sheets, which use fractions)</span></label></div></details>';
   h += '<details class="panel" style="margin-top:14px" data-ui="how"><summary>How the suggestions work</summary><div class="panel-body" style="font-size:13px;line-height:1.55">' +
@@ -711,7 +698,7 @@ function summaryText(R) {
     L.push('');
   });
   L.push('Pallet space (cartons + clusters): peak ' + fmt(R.peak.total, 1) + ' of ' + state.capacity + ' pallets on ' + fMed(R.peak.date) + (r1(R.peak.total) > state.capacity ? ' — OVER ALLOWANCE' : ' — within allowance'));
-  L.push('Can store: peak ' + fmt(R.canPeak.total, 1) + ' pallets (limit ' + state.settings.canMax + ')');
+  L.push('Can store: peak ' + fmt(R.canPeak.total, 1) + ' pallets (aim ' + state.settings.canSoft + ', limit ' + state.settings.canMax + ')');
   return L.join('\n');
 }
 
@@ -904,13 +891,14 @@ async function importInventory(file) {
   toast('Reading ' + file.name + '…');
   try {
     var res = await parseInventory(file), n = 0;
-    ITEMS.forEach(function (it) { if (it.mat === 'pads') return; state.stock[it.id] = res.stock[it.id] || 0; n++; });
+    var keepCans = state.settings.canStockFrom !== 'netsuite' && state.canSOH && state.canSOH.date === todayISO();
+    ITEMS.forEach(function (it) { if (it.mat === 'pads' || (keepCans && it.mat === 'cans')) return; state.stock[it.id] = res.stock[it.id] || 0; n++; });
     state.invOnOrder = res.onOrder;
     state.invMeta = { name: file.name, at: todayISO(), n: Object.keys(res.stock).length };
     if (state.sample) { state.open = []; state.sample = false; }
     state.countDate = todayISO();
     commit();
-    toast('Stock loaded · ' + state.invMeta.n + ' items · stock date set to today' + (res.unmapped.length ? ' · not tracked: ' + res.unmapped.slice(0, 3).join(', ') : ''));
+    toast('Stock loaded · ' + state.invMeta.n + ' items · stock date set to today' + (keepCans ? ' · can stock kept from the Orora sheet' : '') + (res.unmapped.length ? ' · not tracked: ' + res.unmapped.slice(0, 3).join(', ') : ''));
   } catch (e) { toast('Could not read that file: ' + (e && e.message ? e.message : e)); }
 }
 
@@ -927,7 +915,7 @@ async function readSheets(file, maxSheets) {
     var xml = await zip.text(relMap[list[i].rid].replace(/^\/?(xl\/)?/, 'xl/')); if (!xml) continue;
     var rows = {};
     xml.replace(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g, function (m, r, body) {
-      if (Number(r) > 40) return m;
+      if (Number(r) > 100) return m;
       var cells = {};
       body.replace(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g, function (mm, attrs, inner) {
         var ref = /\br="([A-Z]+)\d+"/.exec(attrs), ty = /\bt="([^"]+)"/.exec(attrs), v = /<v>([\s\S]*?)<\/v>/.exec(inner || '');
@@ -950,12 +938,19 @@ async function readSheets(file, maxSheets) {
 function sheetSku(label) { return mapSku(String(label || '').toUpperCase().replace(/^\s*(BALTER|GREEN\s*BEACON|GB\s*(?=WIND|WAY|SUB))\s*/, function (m) { return /^GB/.test(m.trim()) ? 'GB' : ''; })); }
 
 async function parseDeliverySheets(file) {
-  var sheets = await readSheets(file, 14), kind = null, found = {}, weekOf = {}, from = state.countDate, to = TL.dw;
+  var sheets = await readSheets(file, 14), kind = null, found = {}, weekOf = {}, from = state.countDate, to = TL.dw, soh = null, sohWk = -1;
   function put(key, rec, wk) { if (!found[key] || wk >= weekOf[key]) { found[key] = rec; weekOf[key] = wk; } }
   sheets.forEach(function (sh) {
     var c2 = String((sh.rows['2'] || {})[3] || ''), r8 = sh.rows['8'] || {}, wk = typeof (sh.rows['2'] || {})[5] === 'number' ? (sh.rows['2'] || {})[5] : 0;
     if (/can ordering/i.test(c2)) {
       kind = 'orora';
+      // start-of-business stock block (row 72 dates, rows 73+ by SKU)
+      var r72 = sh.rows['72'] || {};
+      for (var cc = 4; cc <= 16; cc++) if (typeof r72[cc] === 'number' && serialToISO(r72[cc]) === state.countDate && wk >= sohWk) {
+        var st = {};
+        for (var rr = 73; rr <= 90; rr++) { var rw = sh.rows[String(rr)] || {}, sk = sheetSku(rw[2]); if (sk && ITEM['cans:' + sk] && typeof rw[cc] === 'number') st[sk] = rw[cc]; }
+        if (Object.keys(st).length) { soh = { date: state.countDate, stock: st, sheet: sh.name }; sohWk = wk; }
+      }
       [5, 7, 9, 11, 13].forEach(function (col) {
         if (typeof r8[col] !== 'number') return;
         var date = serialToISO(r8[col]); if (date < from || date >= to) return;
@@ -984,7 +979,7 @@ async function parseDeliverySheets(file) {
     }
   });
   if (!kind) throw new Error('Not an Orora Order Sheet or Cluster Wrap Order Sheet');
-  return { kind: kind, loads: Object.keys(found).map(function (k) { return found[k]; }) };
+  return { kind: kind, soh: soh, loads: Object.keys(found).map(function (k) { return found[k]; }) };
 }
 
 async function importDeliverySheets(files) {
@@ -1002,6 +997,13 @@ async function importDeliverySheets(files) {
       res.loads.forEach(function (l) { if (l.date < from) return; l.id = state.uid++; state.open.push(l); n++; });
       state.delMeta = state.delMeta || {};
       state.delMeta[res.kind] = { name: f.name, at: todayISO(), n: n };
+      if (res.kind === 'orora') {
+        if (res.soh && state.settings.canStockFrom !== 'netsuite') {
+          state.canSOH = res.soh;
+          ITEMS.forEach(function (it) { if (it.mat === 'cans') state.stock[it.id] = res.soh.stock[it.sku] || 0; });
+          done.push('can stock from the sheet\'s start-of-business figures for ' + fMed(res.soh.date));
+        } else if (!res.soh) done.push('no stock figures for ' + fMed(state.countDate) + ' found in the sheet');
+      }
       done.push((res.kind === 'orora' ? 'Orora' : 'Cluster') + ': ' + n + ' deliveries');
     } catch (e) { err.push(f.name + ' — ' + (e && e.message ? e.message : e)); }
   }
@@ -1033,6 +1035,7 @@ function onChange(e) {
       break;
     case 'setting': state.settings[t.dataset.k] = Math.max(0, num(t.value)); if (t.dataset.k === 'clusterWeeks') state.settings.clusterWeeks = state.settings.clusterWeeks === 2 ? 2 : 1; if (t.dataset.k === 'casesPerPallet' && !state.settings.casesPerPallet) state.settings.casesPerPallet = 1; break;
     case 'cdin': state.settings.dueTodayOpen = t.checked; break;
+    case 'cansrc': state.settings.canStockFrom = t.value === 'netsuite' ? 'netsuite' : 'orora'; break;
     case 'invcol': state.settings.invCol = t.value === 'total' ? 'total' : 'brewery'; break;
     case 'whole': state.settings.wholePallets = t.checked; break;
     case 'oqty': state.open.forEach(function (o) { if (String(o.id) === t.dataset.oid) o.qty = fromDisp(ITEM[o.itemId], Math.max(0, num(t.value))); }); break;
